@@ -226,6 +226,14 @@ namespace RemaluxAR.AR
                 return;
             }
             
+            // Фильтруем плоскость
+            if (!ShouldProcessPlane(plane))
+            {
+                // Скрываем отфильтрованные плоскости
+                plane.gameObject.SetActive(false);
+                return;
+            }
+            
             // Определяем тип плоскости
             bool isWall = plane.alignment == PlaneAlignment.Vertical;
             bool isFloor = plane.alignment == PlaneAlignment.HorizontalUp;
@@ -396,6 +404,14 @@ namespace RemaluxAR.AR
             #if UNITY_IOS || UNITY_ANDROID
             Handheld.Vibrate();
             #endif
+            
+            // Визуальная и тактильная обратная связь
+            StartCoroutine(AnimatePaintMark(paintMark));
+            
+            // Haptic feedback (вибрация)
+            #if UNITY_IOS || UNITY_ANDROID
+            Handheld.Vibrate();
+            #endif
 
             Debug.Log($"[WallDetection] Создана метка краски #{paintMarks.Count}. Всего меток: {paintMarks.Count}");
         }
@@ -484,6 +500,46 @@ namespace RemaluxAR.AR
         public string GetStatusInfo()
         {
             return $"Стен: {detectedWalls.Count}\nМеток краски: {paintMarks.Count}\nЦвет: {paintColor}";
+        }
+
+        /// <summary>
+        /// Анимация появления метки краски
+        /// </summary>
+        private System.Collections.IEnumerator AnimatePaintMark(GameObject paintMark)
+        {
+            if (paintMark == null) yield break;
+            
+            Vector3 originalScale = paintMark.transform.localScale;
+            Vector3 startScale = originalScale * 0.1f;
+            
+            // Начинаем с маленького размера
+            paintMark.transform.localScale = startScale;
+            
+            // Плавно увеличиваем до нормального размера за 0.2 секунды
+            float duration = 0.2f;
+            float elapsed = 0f;
+            
+            while (elapsed < duration)
+            {
+                elapsed += Time.deltaTime;
+                float t = elapsed / duration;
+                
+                // Ease-out cubic для плавности
+                t = 1f - Mathf.Pow(1f - t, 3f);
+                
+                if (paintMark != null)
+                {
+                    paintMark.transform.localScale = Vector3.Lerp(startScale, originalScale, t);
+                }
+                
+                yield return null;
+            }
+            
+            // Устанавливаем финальный размер
+            if (paintMark != null)
+            {
+                paintMark.transform.localScale = originalScale;
+            }
         }
 
         /// <summary>
