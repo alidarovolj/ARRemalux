@@ -2320,6 +2320,11 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 718493392}
   m_CullTransparentMesh: 1
+--- !u!20 &772479606 stripped
+Camera:
+  m_CorrespondingSourceObject: {fileID: 2512387469002778331, guid: 48cb3fb68c91eb94999fd99957eb0cae, type: 3}
+  m_PrefabInstance: {fileID: 331264285}
+  m_PrefabAsset: {fileID: 0}
 --- !u!1 &791333383
 GameObject:
   m_ObjectHideFlags: 0
@@ -7350,15 +7355,20 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 9e58700ca98c54a27851210707f51714, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  planeManager: {fileID: 0}
-  raycastManager: {fileID: 0}
-  arCamera: {fileID: 0}
+  planeManager: {fileID: 151853166}
+  raycastManager: {fileID: 2002896030}
+  arCamera: {fileID: 772479606}
   showWallBorders: 1
   wallMaterial: {fileID: 0}
   floorMaterial: {fileID: 0}
+  minWallArea: 0.5
+  minWallHeight: 0.8
+  maxFurnitureHeight: 1.2
   paintColor: {r: 1, g: 0, b: 0, a: 1}
   paintPrefab: {fileID: 0}
   paintSize: 0.05
+  showHints: 1
+  hintDuration: 5
 --- !u!1 &2021867756
 GameObject:
   m_ObjectHideFlags: 0
