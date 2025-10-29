@@ -1,33 +1,3 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleExecutable</key>
-    <string>opencv2</string>
-    <key>CFBundleName</key>
-    <string>OpenCV</string>
-    <key>CFBundleIdentifier</key>
-    <string>org.opencv</string>
-    <key>CFBundleVersion</key>
-    <string>4.12.0</string>
-    <key>CFBundleShortVersionString</key>
-    <string>4.12.0</string>
-    <key>CFBundleSignature</key>
-    <string>????</string>
-    <key>CFBundlePackageType</key>
-    <string>FMWK</string>
-    <key>CFBundleSupportedPlatforms</key>
-    <array>
-        <string>iPhoneOS</string>
-    </array>
-    <key>MinimumOSVersion</key>
-    <string>12.0</string>
-    <key>UIDeviceFamily</key>
-    <array>
-        <integer>1</integer>
-        <integer>2</integer>
-    </array>
-</dict>
-</plist>
+version https://git-lfs.github.com/spec/v1
+oid sha256:4780716b5248a5154f6fd04c58bbd07382f46907ddadd6007348bfe615766685
+size 959
