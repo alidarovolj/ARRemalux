@@ -25,6 +25,11 @@ namespace RemaluxAR.AR
         [SerializeField] private bool showWallBorders = true;
         [SerializeField] private Material wallMaterial;
         [SerializeField] private Material floorMaterial;
+        
+        [Header("Фильтрация плоскостей")]
+        [SerializeField] private float minWallArea = 0.5f; // Минимальная площадь стены в м²
+        [SerializeField] private float minWallHeight = 0.8f; // Минимальная высота стены в метрах
+        [SerializeField] private float maxFurnitureHeight = 1.2f; // Высота, выше которой игнорируем горизонтальные плоскости
 
         [Header("Painting Settings")]
         [SerializeField] private Color paintColor = Color.red;
@@ -34,6 +39,7 @@ namespace RemaluxAR.AR
         // Обнаруженные стены
         private Dictionary<TrackableId, ARPlane> detectedWalls = new Dictionary<TrackableId, ARPlane>();
         private List<GameObject> paintMarks = new List<GameObject>();
+        private float floorLevel = float.MinValue; // Уровень пола для фильтрации
 
         private void Awake()
         {
@@ -137,8 +143,80 @@ namespace RemaluxAR.AR
         /// <summary>
         /// Обрабатывает одну плоскость
         /// </summary>
+        /// <summary>
+        /// Проверяет, подходит ли плоскость по критериям фильтрации
+        /// </summary>
+        private bool ShouldProcessPlane(ARPlane plane)
+        {
+            Vector3 planePosition = plane.transform.position;
+            Vector2 planeSize = plane.size;
+            float planeArea = planeSize.x * planeSize.y;
+            
+            // Обновляем уровень пола
+            if (plane.alignment == PlaneAlignment.HorizontalUp)
+            {
+                if (floorLevel == float.MinValue || planePosition.y < floorLevel)
+                {
+                    floorLevel = planePosition.y;
+                }
+            }
+            
+            // Фильтруем вертикальные плоскости (стены)
+            if (plane.alignment == PlaneAlignment.Vertical)
+            {
+                // Проверяем минимальную площадь
+                if (planeArea < minWallArea)
+                {
+                    return false;
+                }
+                
+                // Проверяем минимальную высоту
+                if (planeSize.y < minWallHeight)
+                {
+                    return false;
+                }
+                
+                return true;
+            }
+            
+            // Фильтруем горизонтальные плоскости (пол, мебель)
+            if (plane.alignment == PlaneAlignment.HorizontalUp || plane.alignment == PlaneAlignment.HorizontalDown)
+            {
+                // Игнорируем маленькие плоскости
+                if (planeArea < minWallArea * 0.5f)
+                {
+                    return false;
+                }
+                
+                // Игнорируем плоскости выше уровня мебели (диваны, столы)
+                if (floorLevel != float.MinValue)
+                {
+                    float heightAboveFloor = planePosition.y - floorLevel;
+                    
+                    // Игнорируем если это явно мебель (между полом и maxFurnitureHeight)
+                    if (heightAboveFloor > 0.1f && heightAboveFloor < maxFurnitureHeight)
+                    {
+                        Debug.Log($"[WallDetection] Игнорируем плоскость на высоте {heightAboveFloor:F2}м - похоже на мебель");
+                        return false;
+                    }
+                }
+                
+                return true;
+            }
+            
+            return true; // Остальные плоскости обрабатываем
+        }
+
         private void ProcessPlane(ARPlane plane, bool isNew)
         {
+            // Фильтруем плоскость
+            if (!ShouldProcessPlane(plane))
+            {
+                // Скрываем отфильтрованные плоскости
+                plane.gameObject.SetActive(false);
+                return;
+            }
+            
             // Определяем тип плоскости
             bool isWall = plane.alignment == PlaneAlignment.Vertical;
             bool isFloor = plane.alignment == PlaneAlignment.HorizontalUp;
@@ -293,6 +371,14 @@ namespace RemaluxAR.AR
             paintMark.transform.position += paintMark.transform.forward * 0.01f;
 
             paintMarks.Add(paintMark);
+            
+            // Визуальная и тактильная обратная связь
+            StartCoroutine(AnimatePaintMark(paintMark));
+            
+            // Haptic feedback (вибрация)
+            #if UNITY_IOS || UNITY_ANDROID
+            Handheld.Vibrate();
+            #endif
 
             Debug.Log($"[WallDetection] Создана метка краски #{paintMarks.Count}. Всего меток: {paintMarks.Count}");
         }
@@ -381,6 +467,46 @@ namespace RemaluxAR.AR
         public string GetStatusInfo()
         {
             return $"Стен: {detectedWalls.Count}\nМеток краски: {paintMarks.Count}\nЦвет: {paintColor}";
+        }
+
+        /// <summary>
+        /// Анимация появления метки краски
+        /// </summary>
+        private System.Collections.IEnumerator AnimatePaintMark(GameObject paintMark)
+        {
+            if (paintMark == null) yield break;
+            
+            Vector3 originalScale = paintMark.transform.localScale;
+            Vector3 startScale = originalScale * 0.1f;
+            
+            // Начинаем с маленького размера
+            paintMark.transform.localScale = startScale;
+            
+            // Плавно увеличиваем до нормального размера за 0.2 секунды
+            float duration = 0.2f;
+            float elapsed = 0f;
+            
+            while (elapsed < duration)
+            {
+                elapsed += Time.deltaTime;
+                float t = elapsed / duration;
+                
+                // Ease-out cubic для плавности
+                t = 1f - Mathf.Pow(1f - t, 3f);
+                
+                if (paintMark != null)
+                {
+                    paintMark.transform.localScale = Vector3.Lerp(startScale, originalScale, t);
+                }
+                
+                yield return null;
+            }
+            
+            // Устанавливаем финальный размер
+            if (paintMark != null)
+            {
+                paintMark.transform.localScale = originalScale;
+            }
         }
 
         private void OnDestroy()
