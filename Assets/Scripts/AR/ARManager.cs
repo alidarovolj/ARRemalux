@@ -101,9 +101,10 @@ namespace RemaluxAR.AR
                 arPlaneManager.enabled = enablePlaneDetection;
                 if (enablePlaneDetection)
                 {
-                    // Включаем обнаружение горизонтальных и вертикальных плоскостей
-                    arPlaneManager.requestedDetectionMode = PlaneDetectionMode.Horizontal | PlaneDetectionMode.Vertical;
-                    Debug.Log("[ARManager] Plane detection enabled (Horizontal + Vertical)");
+                    // ТОЛЬКО ВЕРТИКАЛЬНЫЕ ПЛОСКОСТИ (стены) для устройств без LiDAR
+                    // Это предотвращает обнаружение мебели (столов, диванов, телевизоров)
+                    arPlaneManager.requestedDetectionMode = PlaneDetectionMode.Vertical;
+                    Debug.Log("[ARManager] Plane detection enabled (ONLY Vertical - walls only)");
                 }
             }
 

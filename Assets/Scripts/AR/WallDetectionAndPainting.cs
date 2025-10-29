@@ -25,15 +25,25 @@ namespace RemaluxAR.AR
         [SerializeField] private bool showWallBorders = true;
         [SerializeField] private Material wallMaterial;
         [SerializeField] private Material floorMaterial;
+        
+        [Header("Фильтрация плоскостей")]
+        [SerializeField] private float minWallArea = 0.5f; // Минимальная площадь стены в м²
+        [SerializeField] private float minWallHeight = 0.8f; // Минимальная высота стены в метрах
+        [SerializeField] private float maxFurnitureHeight = 1.2f; // Высота, выше которой игнорируем горизонтальные плоскости
 
         [Header("Painting Settings")]
         [SerializeField] private Color paintColor = Color.red;
         [SerializeField] private GameObject paintPrefab;
         [SerializeField] private float paintSize = 0.05f; // 5 см
+        
+        [Header("UI Подсказки")]
+        [SerializeField] private bool showHints = true;
+        [SerializeField] private float hintDuration = 5f; // Сколько секунд показывать подсказку
 
         // Обнаруженные стены
         private Dictionary<TrackableId, ARPlane> detectedWalls = new Dictionary<TrackableId, ARPlane>();
         private List<GameObject> paintMarks = new List<GameObject>();
+        private float floorLevel = float.MinValue; // Уровень пола для фильтрации
 
         private void Awake()
         {
@@ -90,6 +100,28 @@ namespace RemaluxAR.AR
             
             Debug.Log("[WallDetection] Инициализация завершена. Начните сканирование помещения!");
             Debug.Log("[WallDetection] Кликайте/тапайте на стены для их окраски.");
+            
+            // Показываем подсказки для быстрого сканирования
+            if (showHints)
+            {
+                StartCoroutine(ShowScanningHints());
+            }
+        }
+        
+        /// <summary>
+        /// Показывает подсказки для ускорения сканирования
+        /// </summary>
+        private System.Collections.IEnumerator ShowScanningHints()
+        {
+            yield return new WaitForSeconds(1f);
+            
+            Debug.Log("💡 [ПОДСКАЗКА] Медленно двигайте телефон из стороны в сторону для сканирования");
+            yield return new WaitForSeconds(hintDuration);
+            
+            Debug.Log("💡 [ПОДСКАЗКА] Направляйте камеру на стены под разными углами");
+            yield return new WaitForSeconds(hintDuration);
+            
+            Debug.Log("💡 [ПОДСКАЗКА] Хорошее освещение ускоряет обнаружение поверхностей");
         }
 
         private void Update()
@@ -137,8 +169,52 @@ namespace RemaluxAR.AR
         /// <summary>
         /// Обрабатывает одну плоскость
         /// </summary>
+        /// <summary>
+        /// Проверяет, подходит ли плоскость по критериям фильтрации
+        /// </summary>
+        private bool ShouldProcessPlane(ARPlane plane)
+        {
+            Vector3 planePosition = plane.transform.position;
+            Vector2 planeSize = plane.size;
+            float planeArea = planeSize.x * planeSize.y;
+            
+            // ТОЛЬКО ВЕРТИКАЛЬНЫЕ ПЛОСКОСТИ (СТЕНЫ) для устройств без LiDAR
+            // Это предотвращает обнаружение плоскостей на мебели
+            if (plane.alignment != PlaneAlignment.Vertical)
+            {
+                // Скрываем все невертикальные плоскости
+                Debug.Log($"[WallDetection] Игнорируем невертикальную плоскость (alignment: {plane.alignment})");
+                return false;
+            }
+            
+            // Фильтруем вертикальные плоскости (стены)
+            // Проверяем минимальную площадь
+            if (planeArea < minWallArea)
+            {
+                Debug.Log($"[WallDetection] Игнорируем маленькую стену (площадь: {planeArea:F2}м²)");
+                return false;
+            }
+            
+            // Проверяем минимальную высоту
+            if (planeSize.y < minWallHeight)
+            {
+                Debug.Log($"[WallDetection] Игнорируем низкую стену (высота: {planeSize.y:F2}м)");
+                return false;
+            }
+            
+            return true;
+        }
+
         private void ProcessPlane(ARPlane plane, bool isNew)
         {
+            // Фильтруем плоскость
+            if (!ShouldProcessPlane(plane))
+            {
+                // Скрываем отфильтрованные плоскости
+                plane.gameObject.SetActive(false);
+                return;
+            }
+            
             // Определяем тип плоскости
             bool isWall = plane.alignment == PlaneAlignment.Vertical;
             bool isFloor = plane.alignment == PlaneAlignment.HorizontalUp;
@@ -293,6 +369,14 @@ namespace RemaluxAR.AR
             paintMark.transform.position += paintMark.transform.forward * 0.01f;
 
             paintMarks.Add(paintMark);
+            
+            // Визуальная и тактильная обратная связь
+            StartCoroutine(AnimatePaintMark(paintMark));
+            
+            // Haptic feedback (вибрация)
+            #if UNITY_IOS || UNITY_ANDROID
+            Handheld.Vibrate();
+            #endif
 
             Debug.Log($"[WallDetection] Создана метка краски #{paintMarks.Count}. Всего меток: {paintMarks.Count}");
         }
@@ -381,6 +465,46 @@ namespace RemaluxAR.AR
         public string GetStatusInfo()
         {
             return $"Стен: {detectedWalls.Count}\nМеток краски: {paintMarks.Count}\nЦвет: {paintColor}";
+        }
+
+        /// <summary>
+        /// Анимация появления метки краски
+        /// </summary>
+        private System.Collections.IEnumerator AnimatePaintMark(GameObject paintMark)
+        {
+            if (paintMark == null) yield break;
+            
+            Vector3 originalScale = paintMark.transform.localScale;
+            Vector3 startScale = originalScale * 0.1f;
+            
+            // Начинаем с маленького размера
+            paintMark.transform.localScale = startScale;
+            
+            // Плавно увеличиваем до нормального размера за 0.2 секунды
+            float duration = 0.2f;
+            float elapsed = 0f;
+            
+            while (elapsed < duration)
+            {
+                elapsed += Time.deltaTime;
+                float t = elapsed / duration;
+                
+                // Ease-out cubic для плавности
+                t = 1f - Mathf.Pow(1f - t, 3f);
+                
+                if (paintMark != null)
+                {
+                    paintMark.transform.localScale = Vector3.Lerp(startScale, originalScale, t);
+                }
+                
+                yield return null;
+            }
+            
+            // Устанавливаем финальный размер
+            if (paintMark != null)
+            {
+                paintMark.transform.localScale = originalScale;
+            }
         }
 
         private void OnDestroy()
