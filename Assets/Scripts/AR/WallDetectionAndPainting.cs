@@ -27,9 +27,8 @@ namespace RemaluxAR.AR
         [SerializeField] private Material floorMaterial;
         
         [Header("Фильтрация плоскостей")]
-        [SerializeField] private float minWallArea = 0.5f; // Минимальная площадь стены в м²
+        [SerializeField] private float minWallArea = 1.0f; // Минимальная площадь стены в м² (увеличено для быстрого обнаружения)
         [SerializeField] private float minWallHeight = 0.8f; // Минимальная высота стены в метрах
-        [SerializeField] private float maxFurnitureHeight = 1.2f; // Высота, выше которой игнорируем горизонтальные плоскости
 
         [Header("Painting Settings")]
         [SerializeField] private Color paintColor = Color.red;
@@ -39,11 +38,15 @@ namespace RemaluxAR.AR
         [Header("UI Подсказки")]
         [SerializeField] private bool showHints = true;
         [SerializeField] private float hintDuration = 5f; // Сколько секунд показывать подсказку
+        
+        [Header("Оптимизация производительности")]
+        [SerializeField] private float planeUpdateThrottle = 0.1f; // Минимальный интервал между обновлениями плоскостей (сек)
 
         // Обнаруженные стены
         private Dictionary<TrackableId, ARPlane> detectedWalls = new Dictionary<TrackableId, ARPlane>();
         private List<GameObject> paintMarks = new List<GameObject>();
-        private float floorLevel = float.MinValue; // Уровень пола для фильтрации
+        private float lastPlaneUpdateTime = 0f; // Время последнего обновления плоскостей
+        private Coroutine scanningHintsCoroutine; // Ссылка на корутину подсказок для остановки
 
         private void Awake()
         {
@@ -78,7 +81,7 @@ namespace RemaluxAR.AR
             }
         }
 
-        new private void OnDisable()
+        private void OnDisable()
         {
             // Отписываемся от событий
             if (planeManager != null)
@@ -104,7 +107,7 @@ namespace RemaluxAR.AR
             // Показываем подсказки для быстрого сканирования
             if (showHints)
             {
-                StartCoroutine(ShowScanningHints());
+                scanningHintsCoroutine = StartCoroutine(ShowScanningHints());
             }
         }
         
@@ -134,6 +137,14 @@ namespace RemaluxAR.AR
         /// </summary>
         private void OnPlanesChanged(ARPlanesChangedEventArgs args)
         {
+            // Throttling: ограничиваем частоту обновлений для снижения нагрузки на CPU
+            float currentTime = Time.time;
+            if (currentTime - lastPlaneUpdateTime < planeUpdateThrottle)
+            {
+                return; // Пропускаем обновление, если прошло недостаточно времени
+            }
+            lastPlaneUpdateTime = currentTime;
+            
             // Обработка новых плоскостей
             foreach (var plane in args.added)
             {
@@ -231,6 +242,14 @@ namespace RemaluxAR.AR
                     {
                         Debug.Log($"[WallDetection] ✓ СТЕНА обнаружена! ID: {plane.trackableId}, размер: {plane.size}");
                         detectedWalls[plane.trackableId] = plane;
+                        
+                        // Останавливаем подсказки после обнаружения первой стены
+                        if (detectedWalls.Count == 1 && scanningHintsCoroutine != null)
+                        {
+                            StopCoroutine(scanningHintsCoroutine);
+                            scanningHintsCoroutine = null;
+                            Debug.Log("[WallDetection] Подсказки остановлены - первая стена обнаружена!");
+                        }
                         
                         // Визуализируем границы стены
                         if (showWallBorders)

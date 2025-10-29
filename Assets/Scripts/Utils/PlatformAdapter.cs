@@ -15,15 +15,29 @@ namespace RemaluxAR.Utils
             get
             {
 #if UNITY_IOS && !UNITY_EDITOR
-                // На iOS проверяем через ARMeshManager и доступные subsystems
-                // Если ARKit XR Plugin установлен и активен, mesh scanning может быть доступен
-                var meshManager = Object.FindObjectOfType<UnityEngine.XR.ARFoundation.ARMeshManager>();
-                if (meshManager != null)
+                // На iOS проверяем через XRMeshSubsystem - правильный способ!
+                // Subsystem будет недоступен на устройствах без LiDAR
+                try
                 {
-                    // Простая проверка: если ARMeshManager есть в сцене, считаем что поддерживается
-                    return true;
+                    var subsystems = new System.Collections.Generic.List<UnityEngine.XR.XRMeshSubsystem>();
+                    UnityEngine.SubsystemManager.GetSubsystems(subsystems);
+                    
+                    // Если есть хотя бы один активный mesh subsystem - значит LiDAR поддерживается
+                    foreach (var subsystem in subsystems)
+                    {
+                        if (subsystem != null && subsystem.running)
+                        {
+                            return true;
+                        }
+                    }
+                    
+                    return false;
                 }
-                return false;
+                catch
+                {
+                    // Если произошла ошибка - LiDAR недоступен
+                    return false;
+                }
 #else
                 // На Android нет встроенного mesh scanning
                 return false;

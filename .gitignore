@@ -61,21 +61,13 @@ crash.dump
 *.aab
 *.unitypackage
 BuildFolder/
-*.md
+NewBuild/
 
 # Crashlytics generated file
 crashlytics-build.properties
 
 # Packed Addressables
 /[Aa]ssets/[Aa]ddressable[Aa]ssets[Dd]ata/*/*.bin*
-
-# Large binary files and plugins
-/Assets/OpenCVForUnity/
-*.so
-*.bc
-*.dylib
-*.dll
-*.exe
 
 # Temporary files
 .DS_Store
