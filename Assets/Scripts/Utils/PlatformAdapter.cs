@@ -27,7 +27,7 @@ namespace RemaluxAR.Utils
                     {
                         if (subsystem != null && subsystem.running)
                         {
-                            return true;
+                    return true;
                         }
                     }
                     
@@ -36,7 +36,7 @@ namespace RemaluxAR.Utils
                 catch
                 {
                     // Если произошла ошибка - LiDAR недоступен
-                    return false;
+                return false;
                 }
 #else
                 // На Android нет встроенного mesh scanning

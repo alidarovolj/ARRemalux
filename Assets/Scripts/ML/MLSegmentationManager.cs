@@ -1,335 +1,390 @@
 using System;
-using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using UnityEngine;
+using UnityEngine.XR.ARFoundation;
 
 namespace RemaluxAR.ML
 {
     /// <summary>
-    /// Менеджер для семантической сегментации с использованием ML моделей
-    /// Поддерживает CoreML (iOS) и TensorFlow Lite (Android)
-    /// 
-    /// ПРИМЕЧАНИЕ: Это базовая структура. Для полной реализации требуется:
-    /// - CoreML модель (.mlmodel) для iOS
-    /// - TFLite модель (.tflite) для Android
-    /// - Unity Barracuda или нативные плагины
+    /// Управляет ML semantic segmentation для точного обнаружения стен
+    /// Использует SegFormer-B0 модель для pixel-level классификации
     /// </summary>
     public class MLSegmentationManager : MonoBehaviour
     {
-        [Header("Model Settings")]
-        [SerializeField] private bool enableSegmentation = false;
-        [SerializeField] private float inferenceInterval = 0.2f;      // Запускать каждые 200ms
-        [SerializeField] private int inputResolution = 256;           // 256x256 для SegFormer-B0
-
-        [Header("Segmentation Classes")]
-        [SerializeField] private bool allowPaintingOnWalls = true;
-        [SerializeField] private bool allowPaintingOnFloor = true;
-        [SerializeField] private bool allowPaintingOnFurniture = false;
-        [SerializeField] private bool allowPaintingOnPeople = false;
-
-        // State
-        private bool isInitialized = false;
+        #if UNITY_IOS
+        // ====================================
+        // iOS CoreML Native Plugin (P/Invoke)
+        // ====================================
+        
+        [DllImport("__Internal")]
+        private static extern bool CoreML_Initialize(string modelPath);
+        
+        [DllImport("__Internal")]
+        private static extern void CoreML_SegmentCurrentFrame(byte[] outputBuffer, int bufferSize, int resolution);
+        
+        [DllImport("__Internal")]
+        private static extern void CoreML_SegmentImage(string imagePath, byte[] outputBuffer, int bufferSize, int resolution);
+        
+        [DllImport("__Internal")]
+        private static extern void CoreML_Cleanup();
+        
+        [DllImport("__Internal")]
+        private static extern bool CoreML_IsInitialized();
+        #endif
+        
+        #if UNITY_ANDROID
+        // ====================================
+        // Android TFLite Native Plugin (P/Invoke)
+        // ====================================
+        
+        [DllImport("libtflite-segmentation")]
+        private static extern bool TFLite_Initialize(string modelPath);
+        
+        [DllImport("libtflite-segmentation")]
+        private static extern void TFLite_SegmentCurrentFrame(byte[] outputBuffer, int bufferSize, int resolution);
+        
+        [DllImport("libtflite-segmentation")]
+        private static extern void TFLite_Cleanup();
+        
+        [DllImport("libtflite-segmentation")]
+        private static extern bool TFLite_IsInitialized();
+        #endif
+        [Header("ML Model Settings")]
+        [Tooltip("Путь к ONNX модели в Assets/ML")]
+        [SerializeField] private string modelPath = "ML/optimum:segformer-b0-finetuned-ade-512-512/model.onnx";
+        
+        [Tooltip("Включить ML segmentation (требует CoreML на iOS / TFLite на Android)")]
+        [SerializeField] private bool enableMLSegmentation = false;
+        
+        [Header("Performance Settings")]
+        [Tooltip("Интервал между ML inference (секунды). 0.2 = 5 FPS inference")]
+        [SerializeField] private float inferenceInterval = 0.2f;
+        
+        [Tooltip("Разрешение для inference (меньше = быстрее)")]
+        [SerializeField] private int inferenceResolution = 512;
+        
+        [Header("Class IDs (ADE20K dataset)")]
+        private const int WALL_CLASS = 0;
+        private const int DOOR_CLASS = 14;
+        private const int PERSON_CLASS = 12;
+        private const int SOFA_CLASS = 23;
+        private const int CHAIR_CLASS = 19;
+        private const int TABLE_CLASS = 15;
+        private const int TV_CLASS = 89;
+        private const int FLOOR_CLASS = 3;
+        private const int CEILING_CLASS = 5;
+        
+        [Header("References")]
+        [SerializeField] private ARCameraManager arCameraManager;
+        
+        // Текущая маска сегментации (512x512 пикселей, каждый пиксель = class ID)
+        private byte[] currentSegmentationMask;
         private float lastInferenceTime = 0f;
-        private byte[,] currentSegmentationMap;  // Класс для каждого пикселя
-
-        // Events
-        // Suppress warning - это событие используется для будущей интеграции ML
-#pragma warning disable 0067
-        public event Action<byte[,]> OnSegmentationCompleted;
-#pragma warning restore 0067
+        private bool isInitialized = false;
+        
+        // Статистика
+        private int totalInferences = 0;
+        private float averageInferenceTime = 0f;
 
         /// <summary>
-        /// Классы сегментации (пример для ADE20K dataset)
+        /// Проверяет инициализирована ли ML модель
         /// </summary>
-        public enum SegmentationClass
+        public bool IsInitialized => isInitialized;
+
+        private void Awake()
         {
-            Unknown = 0,
-            Wall = 1,
-            Floor = 3,
-            Ceiling = 5,
-            Person = 13,
-            Table = 15,
-            Chair = 19,
-            // ... добавьте другие классы по необходимости
+            if (arCameraManager == null)
+            {
+                arCameraManager = FindObjectOfType<ARCameraManager>();
+            }
         }
 
         private void Start()
         {
-            if (enableSegmentation)
+            if (enableMLSegmentation)
             {
-                InitializeModel();
+                InitializeMLModel();
+            }
+            else
+            {
+                Debug.LogWarning("[MLSegmentation] ML segmentation отключена. Включите 'Enable ML Segmentation' для активации.");
             }
         }
 
         /// <summary>
-        /// Инициализирует ML модель
+        /// Инициализация ML модели
         /// </summary>
-        private void InitializeModel()
+        private void InitializeMLModel()
         {
-            Debug.Log("[MLSegmentationManager] Initializing segmentation model...");
-
-#if UNITY_IOS && !UNITY_EDITOR
-            InitializeCoreML();
-#elif UNITY_ANDROID && !UNITY_EDITOR
-            InitializeTFLite();
+            #if UNITY_IOS
+            InitializeCoreMLModel();
+            #elif UNITY_ANDROID
+            InitializeTFLiteModel();
 #else
-            Debug.LogWarning("[MLSegmentationManager] ML не поддерживается в редакторе. Используйте устройство.");
-            isInitialized = false;
+            Debug.LogError("[MLSegmentation] ML segmentation поддерживается только на iOS (CoreML) и Android (TFLite)!");
+            enableMLSegmentation = false;
+            return;
 #endif
+            
+            // Инициализация буфера для маски
+            currentSegmentationMask = new byte[inferenceResolution * inferenceResolution];
+            
+            isInitialized = true;
+            Debug.Log($"[MLSegmentation] Модель инициализирована: {modelPath}");
+            Debug.Log($"[MLSegmentation] Inference resolution: {inferenceResolution}x{inferenceResolution}");
+            Debug.Log($"[MLSegmentation] Inference interval: {inferenceInterval}s (~{1f/inferenceInterval:F0} FPS)");
         }
 
+        #if UNITY_IOS
         /// <summary>
-        /// Инициализирует CoreML модель (iOS)
+        /// Инициализация CoreML модели на iOS
         /// </summary>
-        private void InitializeCoreML()
+        private void InitializeCoreMLModel()
         {
-#if UNITY_IOS && !UNITY_EDITOR
-            // TODO: Загрузить CoreML модель
-            // Варианты:
-            // 1. Unity Barracuda (если модель конвертирована в ONNX)
-            // 2. Нативный iOS плагин через Objective-C++
+            Debug.Log("[MLSegmentation] Загрузка CoreML модели...");
             
-            // Пример с Barracuda:
-            // var modelAsset = Resources.Load<NNModel>("SegFormer_B0");
-            // worker = ModelLoader.Load(modelAsset).CreateWorker();
+            // Путь к CoreML модели в StreamingAssets
+            string fullModelPath = System.IO.Path.Combine(Application.streamingAssetsPath, "SegFormerB0_FP16.mlmodel");
             
-            Debug.Log("[MLSegmentationManager] CoreML model initialized");
-            isInitialized = true;
-#endif
+            Debug.Log($"[MLSegmentation] Model path: {fullModelPath}");
+            
+            // Вызов native iOS плагина
+            bool success = CoreML_Initialize(fullModelPath);
+            
+            if (success)
+            {
+                Debug.Log("[MLSegmentation] ✅ CoreML модель инициализирована!");
+            }
+            else
+            {
+                Debug.LogError("[MLSegmentation] ❌ Не удалось инициализировать CoreML модель!");
+                enableMLSegmentation = false;
+            }
         }
+        #endif
 
+        #if UNITY_ANDROID
         /// <summary>
-        /// Инициализирует TensorFlow Lite модель (Android)
+        /// Инициализация TFLite модели на Android
         /// </summary>
-        private void InitializeTFLite()
+        private void InitializeTFLiteModel()
         {
-#if UNITY_ANDROID && !UNITY_EDITOR
-            // TODO: Загрузить TFLite модель
-            // Варианты:
-            // 1. Unity Barracuda (если модель конвертирована)
-            // 2. TFLite C# wrapper
-            // 3. Нативный Android плагин через JNI
-            
-            // Пример пути к модели:
-            // string modelPath = System.IO.Path.Combine(Application.streamingAssetsPath, "segformer_b0.tflite");
-            // interpreter = new TFLite.Interpreter(modelPath);
-            
-            Debug.Log("[MLSegmentationManager] TFLite model initialized");
-            isInitialized = true;
-#endif
+            // TODO: Вызов native Android плагина для загрузки TFLite модели
+            Debug.Log("[MLSegmentation] TODO: Загрузка TFLite модели...");
+            // TFLitePlugin.Initialize(modelPath);
         }
+        #endif
 
         private void Update()
         {
-            if (!enableSegmentation || !isInitialized) return;
+            if (!isInitialized || !enableMLSegmentation) return;
 
-            // Throttling - не запускаем inference каждый кадр
-            if (Time.time - lastInferenceTime < inferenceInterval)
-                return;
-
+            // Throttling: запускаем inference только через определённый интервал
+            if (Time.time - lastInferenceTime >= inferenceInterval)
+            {
+                RunMLInference();
             lastInferenceTime = Time.time;
-
-            // Асинхронно запускаем сегментацию
-            RunSegmentationAsync();
-        }
-
-        /// <summary>
-        /// Асинхронно выполняет сегментацию текущего кадра камеры
-        /// </summary>
-        private async void RunSegmentationAsync()
-        {
-            // TODO: Получить текущий кадр камеры
-            // var cameraImage = GetCameraFrame();
-            
-            // TODO: Выполнить inference в фоновом потоке
-            // var segmentation = await Task.Run(() => RunInference(cameraImage));
-            
-            // currentSegmentationMap = segmentation;
-            // OnSegmentationCompleted?.Invoke(segmentation);
-            
-            await Task.Yield(); // Placeholder
-        }
-
-        /// <summary>
-        /// Выполняет inference модели (заглушка)
-        /// </summary>
-        private byte[,] RunInference(Texture2D input)
-        {
-            // TODO: Реализовать actual inference
-            // 1. Предобработка: resize to inputResolution, normalize
-            // 2. Forward pass через модель
-            // 3. Постобработка: argmax по классам для каждого пикселя
-            // 4. Вернуть segmentation map
-
-            return new byte[inputResolution, inputResolution];
-        }
-
-        /// <summary>
-        /// Проверяет, разрешено ли рисовать на указанной экранной позиции
-        /// </summary>
-        public bool CanPaintAtScreenPosition(Vector2 screenPosition, Vector2 screenSize)
-        {
-            if (!isInitialized || currentSegmentationMap == null)
-                return true; // Разрешаем если сегментация не активна
-
-            // Конвертируем экранные координаты в координаты segmentation map
-            int x = Mathf.RoundToInt((screenPosition.x / screenSize.x) * inputResolution);
-            int y = Mathf.RoundToInt((screenPosition.y / screenSize.y) * inputResolution);
-
-            x = Mathf.Clamp(x, 0, inputResolution - 1);
-            y = Mathf.Clamp(y, 0, inputResolution - 1);
-
-            byte classId = currentSegmentationMap[y, x];
-
-            // Проверяем разрешённые классы
-            return IsClassAllowed(classId);
-        }
-
-        /// <summary>
-        /// Проверяет, разрешён ли данный класс для рисования
-        /// </summary>
-        private bool IsClassAllowed(byte classId)
-        {
-            SegmentationClass segClass = (SegmentationClass)classId;
-
-            switch (segClass)
-            {
-                case SegmentationClass.Wall:
-                    return allowPaintingOnWalls;
-                case SegmentationClass.Floor:
-                    return allowPaintingOnFloor;
-                case SegmentationClass.Person:
-                    return allowPaintingOnPeople;
-                case SegmentationClass.Table:
-                case SegmentationClass.Chair:
-                    return allowPaintingOnFurniture;
-                default:
-                    return true; // По умолчанию разрешаем неизвестные классы
             }
         }
 
         /// <summary>
-        /// Получает текущую карту сегментации
+        /// Запуск ML inference на текущем кадре AR камеры
         /// </summary>
-        public byte[,] GetCurrentSegmentation()
+        private void RunMLInference()
         {
-            return currentSegmentationMap;
+            float startTime = Time.realtimeSinceStartup;
+            
+            #if UNITY_IOS
+            // Вызов CoreML inference
+            int bufferSize = inferenceResolution * inferenceResolution;
+            CoreML_SegmentCurrentFrame(currentSegmentationMask, bufferSize, inferenceResolution);
+            #elif UNITY_ANDROID
+            // Вызов TFLite inference
+            int bufferSize = inferenceResolution * inferenceResolution;
+            TFLite_SegmentCurrentFrame(currentSegmentationMask, bufferSize, inferenceResolution);
+            #endif
+            
+            float inferenceTime = Time.realtimeSinceStartup - startTime;
+            totalInferences++;
+            
+            // Вычисляем среднее время inference
+            averageInferenceTime = (averageInferenceTime * (totalInferences - 1) + inferenceTime) / totalInferences;
+            
+            if (totalInferences % 30 == 0) // Логируем каждые 30 инференсов
+            {
+                Debug.Log($"[MLSegmentation] Avg inference time: {averageInferenceTime * 1000f:F1}ms ({1f/averageInferenceTime:F1} FPS)");
+            }
         }
 
         /// <summary>
-        /// Включает/выключает сегментацию
+        /// Получить класс пикселя в экранной позиции
         /// </summary>
-        public void SetSegmentationEnabled(bool enabled)
+        /// <param name="screenPosition">Позиция на экране (0-1 normalized)</param>
+        /// <returns>Class ID (0-149) или -1 если недоступно</returns>
+        public int GetPixelClass(Vector2 screenPosition)
         {
-            enableSegmentation = enabled;
-            if (enabled && !isInitialized)
+            if (!isInitialized || currentSegmentationMask == null)
             {
-                InitializeModel();
+                return -1;
             }
+            
+            // Конвертация из screen space в mask space
+            int x = Mathf.Clamp((int)(screenPosition.x * inferenceResolution), 0, inferenceResolution - 1);
+            int y = Mathf.Clamp((int)(screenPosition.y * inferenceResolution), 0, inferenceResolution - 1);
+            
+            int index = y * inferenceResolution + x;
+            return currentSegmentationMask[index];
+        }
+
+        /// <summary>
+        /// Проверить, является ли пиксель стеной
+        /// </summary>
+        public bool IsWall(Vector2 screenPosition)
+        {
+            return GetPixelClass(screenPosition) == WALL_CLASS;
+        }
+
+        /// <summary>
+        /// Проверить, является ли пиксель дверью
+        /// </summary>
+        public bool IsDoor(Vector2 screenPosition)
+        {
+            return GetPixelClass(screenPosition) == DOOR_CLASS;
+        }
+
+        /// <summary>
+        /// Flood Fill алгоритм для выделения всей стены от точки клика
+        /// Возвращает список пикселей, принадлежащих той же стене
+        /// </summary>
+        /// <param name="clickPosition">Позиция клика (0-1 normalized)</param>
+        /// <returns>Список пикселей стены или null если клик не на стене</returns>
+        public HashSet<Vector2Int> FloodFillWall(Vector2 clickPosition)
+        {
+            if (!isInitialized || currentSegmentationMask == null)
+        {
+                Debug.LogWarning("[MLSegmentation] Модель не инициализирована!");
+                return null;
+            }
+            
+            int startX = Mathf.Clamp((int)(clickPosition.x * inferenceResolution), 0, inferenceResolution - 1);
+            int startY = Mathf.Clamp((int)(clickPosition.y * inferenceResolution), 0, inferenceResolution - 1);
+            
+            int startClass = currentSegmentationMask[startY * inferenceResolution + startX];
+            
+            // Проверяем, что клик был на стене
+            if (startClass != WALL_CLASS)
+            {
+                Debug.LogWarning($"[MLSegmentation] Клик не на стене! Class: {startClass} (expected {WALL_CLASS})");
+                return null;
+            }
+            
+            // Flood Fill алгоритм (BFS)
+            HashSet<Vector2Int> wallPixels = new HashSet<Vector2Int>();
+            Queue<Vector2Int> queue = new Queue<Vector2Int>();
+            HashSet<Vector2Int> visited = new HashSet<Vector2Int>();
+            
+            Vector2Int startPixel = new Vector2Int(startX, startY);
+            queue.Enqueue(startPixel);
+            visited.Add(startPixel);
+            
+            // 4-connected neighbors (up, down, left, right)
+            Vector2Int[] neighbors = new Vector2Int[]
+            {
+                new Vector2Int(0, 1),   // up
+                new Vector2Int(0, -1),  // down
+                new Vector2Int(1, 0),   // right
+                new Vector2Int(-1, 0)   // left
+            };
+            
+            while (queue.Count > 0)
+            {
+                Vector2Int current = queue.Dequeue();
+                wallPixels.Add(current);
+                
+                // Проверяем всех соседей
+                foreach (var offset in neighbors)
+                {
+                    Vector2Int neighbor = current + offset;
+                    
+                    // Проверка границ
+                    if (neighbor.x < 0 || neighbor.x >= inferenceResolution ||
+                        neighbor.y < 0 || neighbor.y >= inferenceResolution)
+                    {
+                        continue;
+                    }
+                    
+                    // Уже посещали?
+                    if (visited.Contains(neighbor))
+                    {
+                        continue;
+                    }
+                    
+                    visited.Add(neighbor);
+                    
+                    // Проверяем класс соседнего пикселя
+                    int neighborClass = currentSegmentationMask[neighbor.y * inferenceResolution + neighbor.x];
+                    
+                    // Если сосед тоже стена - добавляем в очередь
+                    if (neighborClass == WALL_CLASS)
+                    {
+                        queue.Enqueue(neighbor);
+                    }
+                }
+                
+                // Защита от бесконечного цикла
+                if (wallPixels.Count > inferenceResolution * inferenceResolution / 2)
+                {
+                    Debug.LogWarning("[MLSegmentation] Flood fill превысил лимит пикселей!");
+                    break;
+                }
+            }
+            
+            Debug.Log($"[MLSegmentation] ✅ Flood Fill завершён: {wallPixels.Count} пикселей стены");
+            return wallPixels;
+        }
+
+        /// <summary>
+        /// Получить текущую маску сегментации (для отладки)
+        /// </summary>
+        public byte[] GetCurrentMask()
+        {
+            return currentSegmentationMask;
+        }
+
+        /// <summary>
+        /// Получить статистику ML inference
+        /// </summary>
+        public string GetStats()
+        {
+            if (!isInitialized)
+            {
+                return "ML не инициализирована";
+            }
+            
+            return $"Инференсов: {totalInferences}\n" +
+                   $"Среднее время: {averageInferenceTime * 1000f:F1}ms\n" +
+                   $"FPS: {1f/averageInferenceTime:F1}";
         }
 
         private void OnDestroy()
         {
-            // TODO: Освободить ресурсы модели
-            // if (worker != null) worker.Dispose();
-            // if (interpreter != null) interpreter.Dispose();
-        }
-
-        #region Instructions for Full Implementation
-        
-        /*
-         * ПОЛНАЯ РЕАЛИЗАЦИЯ ML СЕГМЕНТАЦИИ:
-         * 
-         * === iOS (CoreML) ===
-         * 
-         * 1. Подготовка модели:
-         *    - Скачайте SegFormer-B0 или DeepLabV3+ модель
-         *    - Конвертируйте в CoreML формат (.mlmodel)
-         *    - Используйте coremltools в Python:
-         *      
-         *      import coremltools as ct
-         *      model = ct.convert(pytorch_model, inputs=[...])
-         *      model.save("SegFormer_B0.mlmodel")
-         * 
-         * 2. Интеграция в Unity:
-         *    Вариант A - Unity Barracuda:
-         *      - Конвертируйте CoreML → ONNX
-         *      - Импортируйте ONNX в Unity как NNModel
-         *      - Используйте Barracuda для inference
-         *    
-         *    Вариант B - Нативный плагин:
-         *      - Создайте Objective-C++ плагин
-         *      - Используйте Vision framework с MLModel
-         *      - Экспортируйте функцию для вызова из C#
-         * 
-         * 3. Код inference (Barracuda):
-         * 
-         *    using Unity.Barracuda;
-         *    
-         *    var modelAsset = Resources.Load<NNModel>("SegFormer_B0");
-         *    var model = ModelLoader.Load(modelAsset);
-         *    var worker = model.CreateWorker();
-         *    
-         *    var input = new Tensor(1, inputResolution, inputResolution, 3);
-         *    // Заполните input данными из камеры
-         *    
-         *    worker.Execute(input);
-         *    var output = worker.PeekOutput();
-         *    // Обработайте output
-         *    
-         *    input.Dispose();
-         *    output.Dispose();
-         * 
-         * === Android (TensorFlow Lite) ===
-         * 
-         * 1. Подготовка модели:
-         *    - Конвертируйте модель в TFLite формат (.tflite)
-         *    - Используйте TensorFlow converter:
-         *      
-         *      converter = tf.lite.TFLiteConverter.from_saved_model(model_path)
-         *      converter.optimizations = [tf.lite.Optimize.DEFAULT]
-         *      tflite_model = converter.convert()
-         * 
-         * 2. Интеграция в Unity:
-         *    Вариант A - Unity Barracuda (как выше)
-         *    
-         *    Вариант B - TFLite C# wrapper:
-         *      - Используйте TensorFlowLite for Unity плагин
-         *      - Или создайте Java/Kotlin плагин с JNI bridge
-         * 
-         * 3. Код inference (пример с плагином):
-         * 
-         *    var interpreter = new TensorFlowLite.Interpreter(modelPath);
-         *    
-         *    var input = new float[1, inputResolution, inputResolution, 3];
-         *    // Заполните input
-         *    
-         *    interpreter.SetInputTensorData(0, input);
-         *    interpreter.Invoke();
-         *    
-         *    var output = new float[1, inputResolution, inputResolution, numClasses];
-         *    interpreter.GetOutputTensorData(0, output);
-         *    // Обработайте output
-         * 
-         * === Общие моменты ===
-         * 
-         * Preprocessing:
-         * - Resize изображения до inputResolution (256x256 для B0)
-         * - Normalize: (pixel / 255.0 - mean) / std
-         *   где mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225]
-         * 
-         * Postprocessing:
-         * - Применить argmax по измерению классов
-         * - Получить класс для каждого пикселя
-         * - Upscale к разрешению экрана если нужно
-         * 
-         * Performance:
-         * - Используйте async/await для inference
-         * - Throttle до 5-10 FPS (не каждый кадр)
-         * - Квантуйте модель (int8) для скорости
-         * - Используйте GPU delegate если доступен
-         */
-        
-        #endregion
+            // Очистка ресурсов
+            currentSegmentationMask = null;
+            
+            #if UNITY_IOS
+            if (isInitialized)
+            {
+                CoreML_Cleanup();
+                Debug.Log("[MLSegmentation] CoreML ресурсы очищены");
+            }
+            #elif UNITY_ANDROID
+            if (isInitialized)
+            {
+                TFLite_Cleanup();
+                Debug.Log("[MLSegmentation] TFLite ресурсы очищены");
+            }
+            #endif
     }
 }
-
+}

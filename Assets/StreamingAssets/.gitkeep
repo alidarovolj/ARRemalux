@@ -1,0 +1,6 @@
+# StreamingAssets директория для ML моделей
+# Положите сюда:
+# - SegFormerB0_FP16.mlmodel (iOS CoreML)
+# - segformer_fp16.tflite (Android TFLite)
+
+

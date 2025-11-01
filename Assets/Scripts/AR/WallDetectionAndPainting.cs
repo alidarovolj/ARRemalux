@@ -20,20 +20,54 @@ namespace RemaluxAR.AR
         [SerializeField] private ARPlaneManager planeManager;
         [SerializeField] private ARRaycastManager raycastManager;
         [SerializeField] private Camera arCamera;
+        
+        [Header("ML Segmentation (Dulux mode)")]
+        [Tooltip("ML Manager для pixel-perfect определения стен. Если включён - работает режим 'клик → вся стена'")]
+        [SerializeField] private RemaluxAR.ML.MLSegmentationManager mlSegmentationManager;
+        
+        [Header("Hybrid Wall Detection (НОВОЕ!)")]
+        [Tooltip("🆕 ГИБРИДНЫЙ детектор: Depth + Segmentation + AR Planes. Если включён - используется вместо обычных фильтров!")]
+        [SerializeField] private RemaluxAR.ML.HybridWallDetector hybridWallDetector;
+        
+        [Tooltip("Использовать гибридный детектор (рекомендуется!)")]
+        [SerializeField] private bool useHybridDetection = true;
 
         [Header("Wall Detection Settings")]
         [SerializeField] private bool showWallBorders = true;
         [SerializeField] private Material wallMaterial;
         [SerializeField] private Material floorMaterial;
         
-        [Header("Фильтрация плоскостей")]
-        [SerializeField] private float minWallArea = 1.0f; // Минимальная площадь стены в м² (увеличено для быстрого обнаружения)
-        [SerializeField] private float minWallHeight = 0.8f; // Минимальная высота стены в метрах
+        [Header("Режим отладки")]
+        [Tooltip("🔧 DEBUG: Показывать ВСЕ плоскости без фильтров (игнорирует все параметры ниже)")]
+        [SerializeField] private bool debugShowAllPlanes = false;
+        
+        [Header("Фильтрация плоскостей - ЭКСТРЕМАЛЬНО МЯГКИЕ для DEBUG")]
+        [Tooltip("🔥 DEBUG: 0.2 м² - ВИДИМ ВСЁ!")]
+        [SerializeField] private float minWallArea = 0.2f;
+        
+        [Tooltip("🔥 DEBUG: 0.2 м - МИНИМУМ для обнаружения")]
+        [SerializeField] private float minWallHeight = 0.2f;
+        
+        [Tooltip("🔥 DEBUG: 0.2 - Пропускаем почти всё")]
+        [SerializeField] private float minAspectRatio = 0.2f;
+        
+        [Tooltip("Максимальное соотношение ширины к высоте (6.0 = очень широкие стены OK)")]
+        [SerializeField] private float maxAspectRatio = 6.0f;
+        
+        [Tooltip("🔥 DEBUG: 0.1 м - почти на полу!")]
+        [SerializeField] private float minCenterHeightY = 0.1f;
 
         [Header("Painting Settings")]
-        [SerializeField] private Color paintColor = Color.red;
+        [SerializeField] private Color paintColor = new Color(0.89f, 0.82f, 0.76f); // Бежевый как Dulux
         [SerializeField] private GameObject paintPrefab;
         [SerializeField] private float paintSize = 0.05f; // 5 см
+        
+        [Header("Painting Mode - КАК DULUX!")]
+        [Tooltip("🎨 РЕЖИМ DULUX: Клик закрашивает ВСЮ СТЕНУ! (Рекомендуется!)")]
+        [SerializeField] private bool fillWholeWallMode = true;
+        
+        [Tooltip("Wall Painting Manager для заливки всей стены")]
+        [SerializeField] private WallPaintingManager wallPaintingManager;
         
         [Header("UI Подсказки")]
         [SerializeField] private bool showHints = true;
@@ -54,8 +88,22 @@ namespace RemaluxAR.AR
             if (planeManager == null) planeManager = GetComponent<ARPlaneManager>();
             if (raycastManager == null) raycastManager = GetComponent<ARRaycastManager>();
             if (arCamera == null) arCamera = Camera.main;
+            
+            // Auto-find WallPaintingManager
+            if (wallPaintingManager == null)
+            {
+                wallPaintingManager = FindObjectOfType<WallPaintingManager>();
+                
+                if (wallPaintingManager == null && fillWholeWallMode)
+                {
+                    // Создаем автоматически если включен fillWholeWallMode
+                    GameObject managerGO = new GameObject("WallPaintingManager");
+                    wallPaintingManager = managerGO.AddComponent<WallPaintingManager>();
+                    Debug.Log("[WallDetection] ✅ WallPaintingManager создан автоматически");
+                }
+            }
 
-            // Создаём простой префаб для краски если не назначен
+            // Создаём простой префаб для краски если не назначен (для точечного режима)
             if (paintPrefab == null)
             {
                 paintPrefab = CreateDefaultPaintPrefab();
@@ -104,6 +152,34 @@ namespace RemaluxAR.AR
             Debug.Log("[WallDetection] Инициализация завершена. Начните сканирование помещения!");
             Debug.Log("[WallDetection] Кликайте/тапайте на стены для их окраски.");
             
+            // Показываем текущие параметры фильтрации
+            if (debugShowAllPlanes)
+            {
+                Debug.LogWarning("[WallDetection] 🔧 DEBUG MODE: Показываются ВСЕ плоскости без фильтров!");
+            }
+            else
+            {
+                Debug.Log($"[WallDetection] Параметры фильтрации:");
+                Debug.Log($"  - minWallArea: {minWallArea} м²");
+                Debug.Log($"  - minWallHeight: {minWallHeight} м");
+                Debug.Log($"  - minAspectRatio: {minAspectRatio}");
+                Debug.Log($"  - maxAspectRatio: {maxAspectRatio}");
+                Debug.Log($"  - minCenterHeightY: {minCenterHeightY} м");
+            }
+            
+            // ML режим
+            if (fillWholeWallMode)
+            {
+                if (mlSegmentationManager != null)
+                {
+                    Debug.Log("[WallDetection] 🎨 Режим 'Вся стена' (Dulux) активен с ML!");
+                }
+                else
+                {
+                    Debug.LogWarning("[WallDetection] ⚠️ Режим 'Вся стена' включён, но MLSegmentationManager не назначен!");
+                }
+            }
+            
             // Показываем подсказки для быстрого сканирования
             if (showHints)
             {
@@ -133,7 +209,7 @@ namespace RemaluxAR.AR
         }
 
         /// <summary>
-        /// Обработка изменений плоскостей
+        /// Обработка изменений плоскостей (КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ)
         /// </summary>
         private void OnPlanesChanged(ARPlanesChangedEventArgs args)
         {
@@ -145,29 +221,106 @@ namespace RemaluxAR.AR
             }
             lastPlaneUpdateTime = currentTime;
             
-            // Обработка новых плоскостей
+            // ✅ ОБРАБОТКА НОВЫХ ПЛОСКОСТЕЙ (args.added)
             foreach (var plane in args.added)
             {
-                ProcessPlane(plane, isNew: true);
+                ProcessAddedPlane(plane);
             }
 
-            // Обработка обновлённых плоскостей
+            // ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: ОБРАБОТКА ОБНОВЛЕННЫХ ПЛОСКОСТЕЙ (args.updated)
+            // Это исправляет баг, где плоскость уменьшалась с 1.6м² до 0.51м² но оставалась как "стена"
             foreach (var plane in args.updated)
             {
-                ProcessPlane(plane, isNew: false);
+                ProcessUpdatedPlane(plane);
             }
 
-            // Обработка удалённых плоскостей
+            // ✅ ОБРАБОТКА УДАЛЕННЫХ ПЛОСКОСТЕЙ (args.removed)
             foreach (var plane in args.removed)
             {
-                if (detectedWalls.ContainsKey(plane.trackableId))
-                {
-                    detectedWalls.Remove(plane.trackableId);
-                    Debug.Log($"[WallDetection] Стена удалена: {plane.trackableId}");
-                }
+                ProcessRemovedPlane(plane);
             }
 
             // Выводим статистику
+            UpdateDebugStats();
+        }
+
+        /// <summary>
+        /// Обрабатывает новую плоскость
+        /// </summary>
+        private void ProcessAddedPlane(ARPlane plane)
+        {
+            if (ShouldProcessPlane(plane))
+            {
+                if (!detectedWalls.ContainsKey(plane.trackableId))
+                {
+                    detectedWalls.Add(plane.trackableId, plane);
+                    ApplyWallVisualization(plane);
+                    Debug.Log($"[WallDetection] ✅ НОВАЯ СТЕНА обнаружена! ID: {plane.trackableId}, размер: {plane.size}");
+                    
+                    // Останавливаем подсказки после обнаружения первой стены
+                    if (detectedWalls.Count == 1 && scanningHintsCoroutine != null)
+                    {
+                        StopCoroutine(scanningHintsCoroutine);
+                        scanningHintsCoroutine = null;
+                        Debug.Log("[WallDetection] Подсказки остановлены - первая стена обнаружена!");
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Обрабатывает обновление существующей плоскости (КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ БАГА)
+        /// </summary>
+        private void ProcessUpdatedPlane(ARPlane plane)
+        {
+            bool isCurrentlyWall = detectedWalls.ContainsKey(plane.trackableId);
+            bool shouldBeWall = ShouldProcessPlane(plane);
+
+            if (shouldBeWall)
+            {
+                if (!isCurrentlyWall)
+                {
+                    // Плоскость "выросла" и ТЕПЕРЬ стала валидной стеной
+                    detectedWalls.Add(plane.trackableId, plane);
+                    ApplyWallVisualization(plane);
+                    Debug.Log($"[WallDetection] ✅ СТЕНА ОБНОВИЛАСЬ (стала валидной)! ID: {plane.trackableId}, размер: {plane.size}");
+                }
+                else
+                {
+                    // Плоскость все еще является стеной, просто обновились границы
+                    UpdateWallVisualization(plane);
+                }
+            }
+            else
+            {
+                if (isCurrentlyWall)
+                {
+                    // ⚠️ ЭТО ИСПРАВЛЕНИЕ БАГА 0.51м²!
+                    // Плоскость "уменьшилась" и БОЛЬШЕ не соответствует критериям стены
+                    detectedWalls.Remove(plane.trackableId);
+                    plane.gameObject.SetActive(false);
+                    Debug.LogWarning($"[WallDetection] ❌ СТЕНА УДАЛЕНА (стала невалидной)! ID: {plane.trackableId}, размер: {plane.size}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Обрабатывает удаление плоскости ARKit
+        /// </summary>
+        private void ProcessRemovedPlane(ARPlane plane)
+        {
+            if (detectedWalls.ContainsKey(plane.trackableId))
+            {
+                detectedWalls.Remove(plane.trackableId);
+                Debug.Log($"[WallDetection] ❌ СТЕНА УДАЛЕНА (ARKit)! ID: {plane.trackableId}");
+            }
+        }
+
+        /// <summary>
+        /// Выводит статистику обнаружения
+        /// </summary>
+        private void UpdateDebugStats()
+        {
             int wallCount = detectedWalls.Count;
             int totalPlanes = 0;
             foreach (var plane in planeManager.trackables)
@@ -178,117 +331,118 @@ namespace RemaluxAR.AR
         }
 
         /// <summary>
-        /// Обрабатывает одну плоскость
-        /// </summary>
-        /// <summary>
-        /// Проверяет, подходит ли плоскость по критериям фильтрации
+        /// Проверяет, подходит ли плоскость по критериям фильтрации (УЛУЧШЕННАЯ ВЕРСИЯ)
         /// </summary>
         private bool ShouldProcessPlane(ARPlane plane)
         {
             Vector3 planePosition = plane.transform.position;
             Vector2 planeSize = plane.size;
             float planeArea = planeSize.x * planeSize.y;
+            float aspectRatio = planeSize.x / planeSize.y;
+            float centerHeight = planePosition.y;
             
-            // ТОЛЬКО ВЕРТИКАЛЬНЫЕ ПЛОСКОСТИ (СТЕНЫ) для устройств без LiDAR
-            // Это предотвращает обнаружение плоскостей на мебели
+            // Префикс для логов с размерами плоскости
+            string planeInfo = $"[{planeSize.x:F2}м × {planeSize.y:F2}м = {planeArea:F2}м², aspect: {aspectRatio:F2}]";
+            
+            // 🔧 DEBUG MODE: Показать ВСЕ вертикальные плоскости без фильтров
+            if (debugShowAllPlanes)
+            {
+                if (plane.alignment == PlaneAlignment.Vertical)
+                {
+                    Debug.LogWarning($"[WallDetection] 🔧 DEBUG: Показываю плоскость БЕЗ ФИЛЬТРОВ: {planeInfo}");
+                    return true;
+                }
+                return false;
+            }
+            
+            // ✅ ФИЛЬТР 1: ТОЛЬКО ВЕРТИКАЛЬНЫЕ ПЛОСКОСТИ (СТЕНЫ)
             if (plane.alignment != PlaneAlignment.Vertical)
             {
-                // Скрываем все невертикальные плоскости
-                Debug.Log($"[WallDetection] Игнорируем невертикальную плоскость (alignment: {plane.alignment})");
-                return false;
+                return false; // Молча пропускаем невертикальные плоскости (их много)
             }
             
-            // Фильтруем вертикальные плоскости (стены)
-            // Проверяем минимальную площадь
+            // ✅ ФИЛЬТР 2: МИНИМАЛЬНАЯ ПЛОЩАДЬ
             if (planeArea < minWallArea)
             {
-                Debug.Log($"[WallDetection] Игнорируем маленькую стену (площадь: {planeArea:F2}м²)");
+                // Более частое логирование только для очень маленьких плоскостей
+                if (planeArea < 0.2f || planeArea > minWallArea * 0.8f)
+                {
+                    Debug.Log($"[WallDetection] ⏳ Ожидаем роста плоскости: {planeInfo} < {minWallArea:F1}м²");
+                }
                 return false;
             }
             
-            // Проверяем минимальную высоту
+            // ✅ ФИЛЬТР 3: МИНИМАЛЬНАЯ ВЫСОТА
             if (planeSize.y < minWallHeight)
             {
-                Debug.Log($"[WallDetection] Игнорируем низкую стену (высота: {planeSize.y:F2}м)");
+                Debug.LogWarning($"[WallDetection] ❌ Игнор: {planeInfo} Высота {planeSize.y:F2}м < {minWallHeight}м");
                 return false;
             }
             
+            // ✅ ФИЛЬТР 4: ASPECT RATIO (КРИТИЧЕСКИЙ!)
+            if (aspectRatio < minAspectRatio)
+            {
+                Debug.LogWarning($"[WallDetection] ❌ Игнор ДВЕРЬ/КОСЯК: {planeInfo} aspect < {minAspectRatio} (слишком узкая)");
+                return false;
+            }
+            
+            if (aspectRatio > maxAspectRatio)
+            {
+                Debug.LogWarning($"[WallDetection] ❌ Игнор: {planeInfo} aspect > {maxAspectRatio} (странная геометрия)");
+                return false;
+            }
+            
+            // ✅ ФИЛЬТР 5: ВЫСОТА ЦЕНТРА ПЛОСКОСТИ
+            if (centerHeight < minCenterHeightY)
+            {
+                Debug.LogWarning($"[WallDetection] ❌ Игнор МЕБЕЛЬ: {planeInfo} centerY: {centerHeight:F2}м < {minCenterHeightY}м");
+                return false;
+            }
+            
+            // ✅ ВСЕ ФИЛЬТРЫ ПРОЙДЕНЫ - ЭТО СТЕНА!
+            Debug.Log($"[WallDetection] ✅ ВАЛИДНАЯ СТЕНА: {planeInfo}");
             return true;
         }
 
-        private void ProcessPlane(ARPlane plane, bool isNew)
+        /// <summary>
+        /// Применяет визуализацию к стене
+        /// </summary>
+        private void ApplyWallVisualization(ARPlane plane)
         {
-            // Фильтруем плоскость
-            if (!ShouldProcessPlane(plane))
-            {
-                // Скрываем отфильтрованные плоскости
-                plane.gameObject.SetActive(false);
-                return;
-            }
-            
-            // Фильтруем плоскость
-            if (!ShouldProcessPlane(plane))
-            {
-                // Скрываем отфильтрованные плоскости
-                plane.gameObject.SetActive(false);
-                return;
-            }
-            
-            // Определяем тип плоскости
-            bool isWall = plane.alignment == PlaneAlignment.Vertical;
-            bool isFloor = plane.alignment == PlaneAlignment.HorizontalUp;
-            bool isCeiling = plane.alignment == PlaneAlignment.HorizontalDown;
-
-            // Применяем материал в зависимости от типа
             var meshRenderer = plane.GetComponent<MeshRenderer>();
             if (meshRenderer != null)
             {
-                if (isWall)
-                {
-                    meshRenderer.material = wallMaterial;
-                    if (isNew)
-                    {
-                        Debug.Log($"[WallDetection] ✓ СТЕНА обнаружена! ID: {plane.trackableId}, размер: {plane.size}");
-                        detectedWalls[plane.trackableId] = plane;
-                        
-                        // Останавливаем подсказки после обнаружения первой стены
-                        if (detectedWalls.Count == 1 && scanningHintsCoroutine != null)
-                        {
-                            StopCoroutine(scanningHintsCoroutine);
-                            scanningHintsCoroutine = null;
-                            Debug.Log("[WallDetection] Подсказки остановлены - первая стена обнаружена!");
-                        }
-                        
-                        // Визуализируем границы стены
-                        if (showWallBorders)
-                        {
-                            VisualizeWallBorders(plane);
-                        }
-                    }
-                }
-                else if (isFloor)
-                {
-                    meshRenderer.material = floorMaterial;
-                    if (isNew)
-                    {
-                        Debug.Log($"[WallDetection] ✓ ПОЛ обнаружен! ID: {plane.trackableId}, размер: {plane.size}");
-                    }
-                }
-                else if (isCeiling)
-                {
-                    meshRenderer.material = CreateDefaultMaterial(new Color(0.5f, 0.5f, 1f, 0.3f)); // Голубой
-                    if (isNew)
-                    {
-                        Debug.Log($"[WallDetection] ✓ ПОТОЛОК обнаружен! ID: {plane.trackableId}");
-                    }
-                }
-
-                // Делаем плоскости видимыми
+                meshRenderer.material = wallMaterial;
                 meshRenderer.enabled = true;
+                
+                // 🔥 DEBUG: Логируем состояние mesh
+                var meshFilter = plane.GetComponent<MeshFilter>();
+                if (meshFilter != null && meshFilter.mesh != null)
+                {
+                    Debug.Log($"[WallDetection] Mesh: vertices={meshFilter.mesh.vertexCount}, triangles={meshFilter.mesh.triangles.Length/3}");
+                }
+                else
+                {
+                    Debug.LogWarning($"[WallDetection] ⚠️ Mesh отсутствует! Будут только точки boundary.");
+                }
             }
-
-            // Делаем плоскость активной
+            
             plane.gameObject.SetActive(true);
+            
+            // Визуализируем границы стены (ВСЕГДА для DEBUG)
+            VisualizeWallBorders(plane);
+        }
+
+        /// <summary>
+        /// Обновляет визуализацию существующей стены
+        /// </summary>
+        private void UpdateWallVisualization(ARPlane plane)
+        {
+            // Обновляем границы стены (они могли измениться)
+            if (showWallBorders)
+            {
+                VisualizeWallBorders(plane);
+            }
         }
 
         /// <summary>
@@ -350,9 +504,28 @@ namespace RemaluxAR.AR
 
         /// <summary>
         /// Пытается окрасить поверхность в указанной позиции экрана
+        /// Поддерживает 3 режима: 
+        /// 1. Гибридный детектор (Depth + Segmentation + AR)
+        /// 2. "Вся стена" через ML Segmentation
+        /// 3. Точечное рисование (базовое)
         /// </summary>
         private void TryPaintAtPosition(Vector2 screenPosition)
         {
+            // 🆕 РЕЖИМ 1: ГИБРИДНЫЙ ДЕТЕКТОР (приоритетный!)
+            if (useHybridDetection && hybridWallDetector != null)
+            {
+                TryPaintWithHybridDetector(screenPosition);
+                return;
+            }
+            
+            // РЕЖИМ 2: "Вся стена" через ML Segmentation (как Dulux Visualizer)
+            if (fillWholeWallMode && mlSegmentationManager != null)
+            {
+                TryPaintWholeWall(screenPosition);
+                return;
+            }
+            
+            // РЕЖИМ 3: Точечное рисование (оригинальный режим)
             // Выполняем raycast
             List<ARRaycastHit> hits = new List<ARRaycastHit>();
             
@@ -375,53 +548,169 @@ namespace RemaluxAR.AR
             
             Debug.Log("[WallDetection] Клик не попал в стену. Наведите на красную поверхность (стену).");
         }
-
+        
         /// <summary>
-        /// Окрашивает стену в указанной позиции
+        /// 🆕 ГИБРИДНЫЙ РЕЖИМ - использует Depth + Segmentation + AR Planes
         /// </summary>
-        private void PaintWall(Vector3 position, Quaternion rotation, ARPlane plane)
+        private void TryPaintWithHybridDetector(Vector2 screenPosition)
         {
-            // Создаём метку краски
-            GameObject paintMark = Instantiate(paintPrefab, position, rotation);
-            paintMark.transform.localScale = Vector3.one * paintSize;
-            
-            // Применяем цвет
-            var renderer = paintMark.GetComponent<Renderer>();
-            if (renderer != null)
+            // Проверяем через гибридный детектор
+            if (hybridWallDetector.IsWallAtScreenPosition(screenPosition, out var wallInfo))
             {
-                renderer.material.color = paintColor;
+                Debug.Log($"[WallDetection] ✅ ГИБРИДНЫЙ: Стена обнаружена! Confidence: {wallInfo.confidence:F2}, " +
+                         $"Depth: {wallInfo.averageDepth:F2}, Size: {wallInfo.size}");
+                
+                // Выполняем raycast для точного позиционирования
+                List<ARRaycastHit> hits = new List<ARRaycastHit>();
+                
+                if (raycastManager.Raycast(screenPosition, hits, TrackableType.PlaneWithinPolygon))
+                {
+                    foreach (var hit in hits)
+                    {
+                        var plane = planeManager.GetPlane(hit.trackableId);
+                        
+                        if (plane != null && plane.trackableId == wallInfo.arPlane.trackableId)
+                        {
+                            PaintWall(hit.pose.position, hit.pose.rotation, plane);
+                            
+                            // Показываем расширенную информацию
+                            Debug.Log($"[WallDetection] 🎨 Гибридная окраска:\n" +
+                                     $"  • Depth consistency: {wallInfo.depthConsistency:F2}\n" +
+                                     $"  • Non-wall objects: {(wallInfo.hasNonWallObjects ? "Да (people/furniture)" : "Нет")}\n" +
+                                     $"  • Confidence: {wallInfo.confidence:F2}");
+                            
+                            return;
+                        }
+                    }
+                }
             }
-
-            // Сдвигаем немного вперёд от стены, чтобы была видна
-            paintMark.transform.position += paintMark.transform.forward * 0.01f;
-
-            paintMarks.Add(paintMark);
-            
-            // Визуальная и тактильная обратная связь
-            StartCoroutine(AnimatePaintMark(paintMark));
-            
-            // Haptic feedback (вибрация)
-            #if UNITY_IOS || UNITY_ANDROID
-            Handheld.Vibrate();
-            #endif
-            
-            // Визуальная и тактильная обратная связь
-            StartCoroutine(AnimatePaintMark(paintMark));
-            
-            // Haptic feedback (вибрация)
-            #if UNITY_IOS || UNITY_ANDROID
-            Handheld.Vibrate();
-            #endif
-
-            Debug.Log($"[WallDetection] Создана метка краски #{paintMarks.Count}. Всего меток: {paintMarks.Count}");
+            else
+            {
+                Debug.LogWarning("[WallDetection] ❌ ГИБРИДНЫЙ: Клик НЕ на стене! " +
+                                "(Depth, Segmentation или AR Planes не подтвердили стену)");
+            }
         }
 
         /// <summary>
-        /// Очищает все метки краски
+        /// Режим "Вся стена" - использует ML для выделения всей стены от точки клика
+        /// </summary>
+        private void TryPaintWholeWall(Vector2 screenPosition)
+        {
+            // Нормализуем screen position (0-1)
+            Vector2 normalizedPos = new Vector2(
+                screenPosition.x / Screen.width,
+                screenPosition.y / Screen.height
+            );
+            
+            // Проверяем через ML, что клик на стене
+            if (!mlSegmentationManager.IsWall(normalizedPos))
+            {
+                int pixelClass = mlSegmentationManager.GetPixelClass(normalizedPos);
+                Debug.LogWarning($"[WallDetection] ❌ Клик НЕ на стене! ML класс: {pixelClass} (expected 0=wall)");
+                return;
+            }
+            
+            Debug.Log("[WallDetection] ✅ Клик на стене обнаружен через ML! Запуск Flood Fill...");
+            
+            // Flood Fill - получить все пиксели той же стены
+            HashSet<Vector2Int> wallPixels = mlSegmentationManager.FloodFillWall(normalizedPos);
+            
+            if (wallPixels == null || wallPixels.Count == 0)
+            {
+                Debug.LogWarning("[WallDetection] Flood Fill не вернул пиксели стены!");
+                return;
+            }
+            
+            Debug.Log($"[WallDetection] 🎨 Применяем краску к {wallPixels.Count} пикселям стены...");
+            
+            // TODO: Применить текстуру краски ко всей выделенной стене
+            // Для этого нужно:
+            // 1. Создать 3D mesh из 2D pixel mask
+            // 2. Спроецировать на AR plane
+            // 3. Применить материал с цветом краски
+            
+            // ВРЕМЕННО: Визуализируем центр стены
+            Vector2 centerScreen = new Vector2(
+                normalizedPos.x * Screen.width,
+                normalizedPos.y * Screen.height
+            );
+            
+            List<ARRaycastHit> hits = new List<ARRaycastHit>();
+            if (raycastManager.Raycast(centerScreen, hits, TrackableType.PlaneWithinPolygon))
+            {
+                foreach (var hit in hits)
+                {
+                    var plane = planeManager.GetPlane(hit.trackableId);
+                    if (plane != null && plane.alignment == PlaneAlignment.Vertical)
+                    {
+                        // Создаем метку краски в центре обнаруженной стены
+                        PaintWall(hit.pose.position, hit.pose.rotation, plane);
+                        Debug.Log($"[WallDetection] ✅ ВСЯ СТЕНА выделена! ({wallPixels.Count} пикселей)");
+                        
+                        // TODO: Здесь должна быть полная заливка стены, а не одна точка
+                        break;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Окрашивает стену в указанной позиции
+        /// РЕЖИМ DULUX: Закрашивает ВСЮ СТЕНУ одним кликом!
+        /// </summary>
+        private void PaintWall(Vector3 position, Quaternion rotation, ARPlane plane)
+        {
+            if (fillWholeWallMode && wallPaintingManager != null)
+            {
+                // 🎨 РЕЖИМ DULUX: Закрашиваем ВСЮ СТЕНУ!
+                wallPaintingManager.PaintWall(plane, paintColor);
+                
+                Debug.Log($"[WallDetection] 🎨 ВСЯ СТЕНА окрашена! Plane: {plane.trackableId}, размер: {plane.size}, цвет: {paintColor}");
+            }
+            else
+            {
+                // Старый режим: точечная покраска (маленькая сфера)
+                GameObject paintMark = Instantiate(paintPrefab, position, rotation);
+                paintMark.SetActive(true); // ✅ АКТИВИРУЕМ!
+                paintMark.transform.localScale = Vector3.one * paintSize;
+                
+                // Применяем цвет
+                var renderer = paintMark.GetComponent<Renderer>();
+                if (renderer != null)
+                {
+                    renderer.material.color = paintColor;
+                }
+
+                // Сдвигаем немного вперёд от стены, чтобы была видна
+                paintMark.transform.position += paintMark.transform.forward * 0.01f;
+
+                paintMarks.Add(paintMark);
+                
+                // Визуальная и тактильная обратная связь
+                StartCoroutine(AnimatePaintMark(paintMark));
+                
+                Debug.Log($"[WallDetection] ✅ Создана метка краски #{paintMarks.Count} на {position}");
+            }
+            
+            // Haptic feedback (вибрация) - в обоих режимах
+            #if UNITY_IOS || UNITY_ANDROID
+            Handheld.Vibrate();
+            #endif
+        }
+
+        /// <summary>
+        /// Очищает всю краску (и со стен, и точечные метки)
         /// </summary>
         [ContextMenu("Очистить всю краску")]
         public void ClearAllPaint()
         {
+            // Очищаем заливки стен (Dulux режим)
+            if (wallPaintingManager != null)
+            {
+                wallPaintingManager.UnpaintAllWalls();
+            }
+            
+            // Очищаем точечные метки (старый режим)
             foreach (var mark in paintMarks)
             {
                 if (mark != null)
@@ -430,16 +719,24 @@ namespace RemaluxAR.AR
                 }
             }
             paintMarks.Clear();
-            Debug.Log("[WallDetection] Вся краска очищена!");
+            
+            Debug.Log("[WallDetection] ✅ Вся краска очищена!");
         }
 
         /// <summary>
-        /// Меняет цвет краски
+        /// Меняет цвет краски (для будущих окрасок)
         /// </summary>
         public void SetPaintColor(Color color)
         {
             paintColor = color;
-            Debug.Log($"[WallDetection] Цвет краски изменён на {color}");
+            
+            // Обновляем цвет в WallPaintingManager
+            if (wallPaintingManager != null)
+            {
+                wallPaintingManager.SetPaintColor(color);
+            }
+            
+            Debug.Log($"[WallDetection] 🎨 Цвет краски изменён на {color}");
         }
 
         /// <summary>
@@ -500,46 +797,6 @@ namespace RemaluxAR.AR
         public string GetStatusInfo()
         {
             return $"Стен: {detectedWalls.Count}\nМеток краски: {paintMarks.Count}\nЦвет: {paintColor}";
-        }
-
-        /// <summary>
-        /// Анимация появления метки краски
-        /// </summary>
-        private System.Collections.IEnumerator AnimatePaintMark(GameObject paintMark)
-        {
-            if (paintMark == null) yield break;
-            
-            Vector3 originalScale = paintMark.transform.localScale;
-            Vector3 startScale = originalScale * 0.1f;
-            
-            // Начинаем с маленького размера
-            paintMark.transform.localScale = startScale;
-            
-            // Плавно увеличиваем до нормального размера за 0.2 секунды
-            float duration = 0.2f;
-            float elapsed = 0f;
-            
-            while (elapsed < duration)
-            {
-                elapsed += Time.deltaTime;
-                float t = elapsed / duration;
-                
-                // Ease-out cubic для плавности
-                t = 1f - Mathf.Pow(1f - t, 3f);
-                
-                if (paintMark != null)
-                {
-                    paintMark.transform.localScale = Vector3.Lerp(startScale, originalScale, t);
-                }
-                
-                yield return null;
-            }
-            
-            // Устанавливаем финальный размер
-            if (paintMark != null)
-            {
-                paintMark.transform.localScale = originalScale;
-            }
         }
 
         /// <summary>
