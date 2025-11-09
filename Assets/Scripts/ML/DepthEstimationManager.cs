@@ -46,7 +46,7 @@ namespace RemaluxAR.ML
         
         // Статистика
         private int totalEstimations = 0;
-        private float averageEstimationTime = 0f;
+        // private float averageEstimationTime = 0f; // Временно не используется
         
         /// <summary>
         /// Проверяет инициализирована ли depth модель

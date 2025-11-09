@@ -29,15 +29,15 @@ namespace RemaluxAR.ML
         [Tooltip("AR Plane Manager для вертикальных плоскостей")]
         [SerializeField] private ARPlaneManager arPlaneManager;
         
-        [Header("Wall Detection Parameters - DEBUG MODE")]
-        [Tooltip("🔥 DEBUG: 0.2 м² - МАКСИМАЛЬНО МЯГКО!")]
-        [SerializeField] private float minWallArea = 0.2f;
+        [Header("Wall Detection Parameters - ULTRA SOFT DEBUG")]
+        [Tooltip("🔥 DEBUG: 0.1 м² - ВИДИМ ПОЧТИ ВСЁ!")]
+        [SerializeField] private float minWallArea = 0.1f;
         
-        [Tooltip("Depth consistency threshold (0-1). Меньше = строже")]
-        [SerializeField] private float depthConsistencyThreshold = 0.05f;
+        // [Tooltip("Depth consistency threshold (0-1). Меньше = строже")]
+        // [SerializeField] private float depthConsistencyThreshold = 0.05f; // Временно не используется (depth отключен)
         
-        [Tooltip("🔥 DEBUG: 0.1 м - почти на полу!")]
-        [SerializeField] private float minWallHeightFromFloor = 0.1f;
+        [Tooltip("🔥 DEBUG: -1.0 м - ПРИНИМАЕМ ВСЁ, ДАЖЕ ПОЛ!")]
+        [SerializeField] private float minWallHeightFromFloor = -1.0f;
         
         [Header("Object Filtering (ВРЕМЕННО ОТКЛЮЧЕНО)")]
         [Tooltip("⚠️ ОТКЛЮЧЕНО: DeepLabV3 PASCAL VOC не имеет класса 'wall'")]
@@ -170,12 +170,14 @@ namespace RemaluxAR.ML
                 return;
             }
             
-            // Фильтр 3: Минимальная высота от пола
-            if (centerY < minWallHeightFromFloor)
+            // Фильтр 3: Минимальная высота от пола (ВРЕМЕННО ОТКЛЮЧЕН ДЛЯ DEBUG)
+            if (false && centerY < minWallHeightFromFloor)
             {
                 Debug.Log($"[HybridWallDetector] ❌ Игнор: слишком низко (centerY={centerY:F2} < {minWallHeightFromFloor}м)");
                 return;
             }
+            
+            Debug.Log($"[HybridWallDetector] ℹ️ CenterY={centerY:F2}м (фильтр отключен для DEBUG)");
             
             // === DEPTH ANALYSIS (ВРЕМЕННО ОТКЛЮЧЕНО) ===
             // Depth estimation временно недоступен - требуется AR frame integration

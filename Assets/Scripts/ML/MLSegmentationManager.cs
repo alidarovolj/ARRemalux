@@ -55,7 +55,7 @@ namespace RemaluxAR.ML
         [SerializeField] private string modelPath = "ML/optimum:segformer-b0-finetuned-ade-512-512/model.onnx";
         
         [Tooltip("Включить ML segmentation (требует CoreML на iOS / TFLite на Android)")]
-        [SerializeField] private bool enableMLSegmentation = false;
+        [SerializeField] private bool enableMLSegmentation = true; // ✅ ВКЛЮЧЕНО для ML-first подхода!
         
         [Header("Performance Settings")]
         [Tooltip("Интервал между ML inference (секунды). 0.2 = 5 FPS inference")]
@@ -350,6 +350,71 @@ namespace RemaluxAR.ML
         public byte[] GetCurrentMask()
         {
             return currentSegmentationMask;
+        }
+
+        /// <summary>
+        /// Получить разрешение маски сегментации
+        /// </summary>
+        public int GetMaskResolution()
+        {
+            return inferenceResolution;
+        }
+
+        /// <summary>
+        /// Найти контур стены (границу между wall и non-wall пикселями)
+        /// Используется для создания mesh с точными границами как в Dulux
+        /// </summary>
+        /// <param name="wallPixels">Множество пикселей стены из FloodFill</param>
+        /// <returns>Список точек контура стены</returns>
+        public List<Vector2Int> FindWallContour(HashSet<Vector2Int> wallPixels)
+        {
+            if (wallPixels == null || wallPixels.Count == 0)
+            {
+                return null;
+            }
+            
+            List<Vector2Int> contourPoints = new List<Vector2Int>();
+            
+            // Направления для проверки соседей (8-connected)
+            Vector2Int[] directions = new Vector2Int[]
+            {
+                new Vector2Int(0, 1),   // up
+                new Vector2Int(1, 1),   // up-right
+                new Vector2Int(1, 0),   // right
+                new Vector2Int(1, -1),  // down-right
+                new Vector2Int(0, -1),  // down
+                new Vector2Int(-1, -1), // down-left
+                new Vector2Int(-1, 0),  // left
+                new Vector2Int(-1, 1)   // up-left
+            };
+            
+            // Для каждого пикселя стены проверяем, есть ли хотя бы один сосед не-стена
+            foreach (var pixel in wallPixels)
+            {
+                bool isEdge = false;
+                
+                foreach (var dir in directions)
+                {
+                    Vector2Int neighbor = pixel + dir;
+                    
+                    // Если сосед за границами ИЛИ не принадлежит стене - это граница
+                    if (neighbor.x < 0 || neighbor.x >= inferenceResolution ||
+                        neighbor.y < 0 || neighbor.y >= inferenceResolution ||
+                        !wallPixels.Contains(neighbor))
+                    {
+                        isEdge = true;
+                        break;
+                    }
+                }
+                
+                if (isEdge)
+                {
+                    contourPoints.Add(pixel);
+                }
+            }
+            
+            Debug.Log($"[MLSegmentation] ✅ Найдено {contourPoints.Count} точек контура стены");
+            return contourPoints;
         }
 
         /// <summary>

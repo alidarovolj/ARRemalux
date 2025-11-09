@@ -11,15 +11,23 @@ namespace RemaluxAR.AR
     /// <summary>
     /// Упрощённый компонент для обнаружения стен и их окраски
     /// Это минималистичная версия для быстрого тестирования
+    /// 
+    /// ВАЖНО: Этот компонент можно размещать на любом GameObject!
+    /// Все зависимости назначаются через Inspector (нет RequireComponent)
     /// </summary>
-    [RequireComponent(typeof(ARPlaneManager))]
-    [RequireComponent(typeof(ARRaycastManager))]
     public class WallDetectionAndPainting : MonoBehaviour
     {
         [Header("References")]
         [SerializeField] private ARPlaneManager planeManager;
         [SerializeField] private ARRaycastManager raycastManager;
         [SerializeField] private Camera arCamera;
+        
+        [Header("🎨 ML-FIRST PAINTING (КАК DULUX!)")]
+        [Tooltip("⚡ НОВОЕ! ML-first painter - мгновенная покраска БЕЗ ожидания ARKit planes!")]
+        [SerializeField] private MLWallPainter mlWallPainter;
+        
+        [Tooltip("Использовать ML-first подход (приоритет над всеми другими режимами)")]
+        [SerializeField] private bool useMLFirstPainting = true;
         
         [Header("ML Segmentation (Dulux mode)")]
         [Tooltip("ML Manager для pixel-perfect определения стен. Если включён - работает режим 'клик → вся стена'")]
@@ -30,7 +38,7 @@ namespace RemaluxAR.AR
         [SerializeField] private RemaluxAR.ML.HybridWallDetector hybridWallDetector;
         
         [Tooltip("Использовать гибридный детектор (рекомендуется!)")]
-        [SerializeField] private bool useHybridDetection = true;
+        [SerializeField] private bool useHybridDetection = false; // ⚠️ ОТКЛЮЧЕНО: depth/segmentation на заглушке
 
         [Header("Wall Detection Settings")]
         [SerializeField] private bool showWallBorders = true;
@@ -41,21 +49,21 @@ namespace RemaluxAR.AR
         [Tooltip("🔧 DEBUG: Показывать ВСЕ плоскости без фильтров (игнорирует все параметры ниже)")]
         [SerializeField] private bool debugShowAllPlanes = false;
         
-        [Header("Фильтрация плоскостей - ЭКСТРЕМАЛЬНО МЯГКИЕ для DEBUG")]
-        [Tooltip("🔥 DEBUG: 0.2 м² - ВИДИМ ВСЁ!")]
-        [SerializeField] private float minWallArea = 0.2f;
+        [Header("Фильтрация плоскостей - ULTRA SOFT DEBUG MODE")]
+        [Tooltip("🔥 DEBUG: 0.1 м² - МИНИМАЛЬНЫЙ ПОРОГ!")]
+        [SerializeField] private float minWallArea = 0.1f;
         
-        [Tooltip("🔥 DEBUG: 0.2 м - МИНИМУМ для обнаружения")]
-        [SerializeField] private float minWallHeight = 0.2f;
+        [Tooltip("🔥 DEBUG: 0.1 м - ЛЮБАЯ ВЫСОТА!")]
+        [SerializeField] private float minWallHeight = 0.1f;
         
-        [Tooltip("🔥 DEBUG: 0.2 - Пропускаем почти всё")]
-        [SerializeField] private float minAspectRatio = 0.2f;
+        [Tooltip("🔥 DEBUG: 0.05 - ПРИНИМАЕМ ДАЖЕ ОЧЕНЬ УЗКИЕ (двери, углы)!")]
+        [SerializeField] private float minAspectRatio = 0.05f;
         
-        [Tooltip("Максимальное соотношение ширины к высоте (6.0 = очень широкие стены OK)")]
-        [SerializeField] private float maxAspectRatio = 6.0f;
+        [Tooltip("Максимальное соотношение ширины к высоте (10.0 = очень широкие стены OK)")]
+        [SerializeField] private float maxAspectRatio = 10.0f;
         
-        [Tooltip("🔥 DEBUG: 0.1 м - почти на полу!")]
-        [SerializeField] private float minCenterHeightY = 0.1f;
+        [Tooltip("🔥 DEBUG: -0.5 м - ПРИНИМАЕМ ДАЖЕ НИЖЕ КАМЕРЫ!")]
+        [SerializeField] private float minCenterHeightY = -0.5f;
 
         [Header("Painting Settings")]
         [SerializeField] private Color paintColor = new Color(0.89f, 0.82f, 0.76f); // Бежевый как Dulux
@@ -64,7 +72,7 @@ namespace RemaluxAR.AR
         
         [Header("Painting Mode - КАК DULUX!")]
         [Tooltip("🎨 РЕЖИМ DULUX: Клик закрашивает ВСЮ СТЕНУ! (Рекомендуется!)")]
-        [SerializeField] private bool fillWholeWallMode = true;
+        [SerializeField] private bool fillWholeWallMode = true; // ⚠️ Требует реального ML feed (сейчас на заглушке)
         
         [Tooltip("Wall Painting Manager для заливки всей стены")]
         [SerializeField] private WallPaintingManager wallPaintingManager;
@@ -84,19 +92,56 @@ namespace RemaluxAR.AR
 
         private void Awake()
         {
-            // Auto-find компоненты
-            if (planeManager == null) planeManager = GetComponent<ARPlaneManager>();
-            if (raycastManager == null) raycastManager = GetComponent<ARRaycastManager>();
-            if (arCamera == null) arCamera = Camera.main;
+            // 🆕 ML-First Painter
+            if (mlWallPainter == null)
+            {
+                mlWallPainter = GetComponent<MLWallPainter>();
+                if (mlWallPainter == null && useMLFirstPainting)
+                {
+                    Debug.LogWarning("[WallDetection] ⚠️ MLWallPainter не найден! Создаем автоматически...");
+                    mlWallPainter = gameObject.AddComponent<MLWallPainter>();
+                }
+            }
             
-            // Auto-find WallPaintingManager
-            if (wallPaintingManager == null)
+            // Проверка обязательных ссылок
+            if (planeManager == null)
+            {
+                Debug.LogError("[WallDetection] ❌ AR Plane Manager не назначен! Назначьте в Inspector.");
+            }
+            
+            if (raycastManager == null)
+            {
+                Debug.LogError("[WallDetection] ❌ AR Raycast Manager не назначен! Назначьте в Inspector.");
+            }
+            
+            // Auto-find камеры если не назначена
+            if (arCamera == null)
+            {
+                arCamera = Camera.main;
+                if (arCamera != null)
+                {
+                    Debug.Log("[WallDetection] ✅ AR Camera найдена автоматически (Camera.main)");
+                }
+                else
+                {
+                    Debug.LogError("[WallDetection] ❌ AR Camera не найдена! Назначьте в Inspector.");
+                }
+            }
+            
+            // Auto-find WallPaintingManager если режим Fill Whole Wall включен
+            if (fillWholeWallMode && wallPaintingManager == null)
             {
                 wallPaintingManager = FindObjectOfType<WallPaintingManager>();
                 
-                if (wallPaintingManager == null && fillWholeWallMode)
+                if (wallPaintingManager != null)
                 {
-                    // Создаем автоматически если включен fillWholeWallMode
+                    Debug.Log("[WallDetection] ✅ WallPaintingManager найден автоматически");
+                }
+                else
+                {
+                    Debug.LogWarning("[WallDetection] ⚠️ Fill Whole Wall Mode включен, но WallPaintingManager не назначен! Назначьте в Inspector или он будет создан автоматически.");
+                    
+                    // Создаем автоматически
                     GameObject managerGO = new GameObject("WallPaintingManager");
                     wallPaintingManager = managerGO.AddComponent<WallPaintingManager>();
                     Debug.Log("[WallDetection] ✅ WallPaintingManager создан автоматически");
@@ -151,6 +196,12 @@ namespace RemaluxAR.AR
             
             Debug.Log("[WallDetection] Инициализация завершена. Начните сканирование помещения!");
             Debug.Log("[WallDetection] Кликайте/тапайте на стены для их окраски.");
+            
+            // 🆕 ML-FIRST режим
+            if (useMLFirstPainting && mlWallPainter != null)
+            {
+                Debug.Log("[WallDetection] 🎨 ⚡ ML-FIRST РЕЖИМ (как Dulux Visualizer): Мгновенная покраска БЕЗ ожидания ARKit planes!");
+            }
             
             // Показываем текущие параметры фильтрации
             if (debugShowAllPlanes)
@@ -504,21 +555,39 @@ namespace RemaluxAR.AR
 
         /// <summary>
         /// Пытается окрасить поверхность в указанной позиции экрана
-        /// Поддерживает 3 режима: 
-        /// 1. Гибридный детектор (Depth + Segmentation + AR)
-        /// 2. "Вся стена" через ML Segmentation
-        /// 3. Точечное рисование (базовое)
+        /// Поддерживает 4 режима: 
+        /// 1. 🆕 ML-FIRST (КАК DULUX!) - мгновенная покраска по ML маске (ПРИОРИТЕТ!)
+        /// 2. Гибридный детектор (Depth + Segmentation + AR)
+        /// 3. "Вся стена" через ML Segmentation
+        /// 4. Точечное рисование (базовое)
         /// </summary>
         private void TryPaintAtPosition(Vector2 screenPosition)
         {
-            // 🆕 РЕЖИМ 1: ГИБРИДНЫЙ ДЕТЕКТОР (приоритетный!)
+            // 🆕⚡ РЕЖИМ 1: ML-FIRST (КАК DULUX VISUALIZER!) - САМЫЙ ПРИОРИТЕТНЫЙ!
+            if (useMLFirstPainting && mlWallPainter != null)
+            {
+                bool success = mlWallPainter.TryPaintWallAtClick(screenPosition);
+                
+                if (success)
+                {
+                    Debug.Log("[WallDetection] 🎉 ML-FIRST: Стена покрашена мгновенно!");
+                    return;
+                }
+                else
+                {
+                    Debug.LogWarning("[WallDetection] ⚠️ ML-FIRST: Не удалось покрасить (клик не на стене или ML не готова)");
+                    // Fallback на другие режимы
+                }
+            }
+            
+            // РЕЖИМ 2: ГИБРИДНЫЙ ДЕТЕКТОР
             if (useHybridDetection && hybridWallDetector != null)
             {
                 TryPaintWithHybridDetector(screenPosition);
                 return;
             }
             
-            // РЕЖИМ 2: "Вся стена" через ML Segmentation (как Dulux Visualizer)
+            // РЕЖИМ 3: "Вся стена" через ML Segmentation (старый Dulux режим)
             if (fillWholeWallMode && mlSegmentationManager != null)
             {
                 TryPaintWholeWall(screenPosition);
@@ -593,9 +662,34 @@ namespace RemaluxAR.AR
 
         /// <summary>
         /// Режим "Вся стена" - использует ML для выделения всей стены от точки клика
+        /// ВРЕМЕННО: Если ML на заглушке - пропускаем проверку и красим просто по AR Plane
         /// </summary>
         private void TryPaintWholeWall(Vector2 screenPosition)
         {
+            // ⚠️ ВРЕМЕННЫЙ РЕЖИМ: ML сегментация на заглушке - пропускаем проверку
+            // Просто красим по AR Plane как в режиме 3
+            List<ARRaycastHit> hits = new List<ARRaycastHit>();
+            
+            if (raycastManager.Raycast(screenPosition, hits, TrackableType.PlaneWithinPolygon))
+            {
+                foreach (var hit in hits)
+                {
+                    var plane = planeManager.GetPlane(hit.trackableId);
+                    if (plane != null && plane.alignment == PlaneAlignment.Vertical)
+                    {
+                        // Красим ВСЮ СТЕНУ через WallPaintingManager
+                        PaintWall(hit.pose.position, hit.pose.rotation, plane);
+                        Debug.Log($"[WallDetection] ✅ ВСЯ СТЕНА окрашена! (режим без ML проверки)");
+                        return;
+                    }
+                }
+            }
+            
+            Debug.Log("[WallDetection] Клик не попал в стену. Наведите на красную поверхность (стену).");
+            
+            
+            // TODO: Когда ML будет работать с реальной камерой - раскомментировать:
+            /*
             // Нормализуем screen position (0-1)
             Vector2 normalizedPos = new Vector2(
                 screenPosition.x / Screen.width,
@@ -622,36 +716,7 @@ namespace RemaluxAR.AR
             }
             
             Debug.Log($"[WallDetection] 🎨 Применяем краску к {wallPixels.Count} пикселям стены...");
-            
-            // TODO: Применить текстуру краски ко всей выделенной стене
-            // Для этого нужно:
-            // 1. Создать 3D mesh из 2D pixel mask
-            // 2. Спроецировать на AR plane
-            // 3. Применить материал с цветом краски
-            
-            // ВРЕМЕННО: Визуализируем центр стены
-            Vector2 centerScreen = new Vector2(
-                normalizedPos.x * Screen.width,
-                normalizedPos.y * Screen.height
-            );
-            
-            List<ARRaycastHit> hits = new List<ARRaycastHit>();
-            if (raycastManager.Raycast(centerScreen, hits, TrackableType.PlaneWithinPolygon))
-            {
-                foreach (var hit in hits)
-                {
-                    var plane = planeManager.GetPlane(hit.trackableId);
-                    if (plane != null && plane.alignment == PlaneAlignment.Vertical)
-                    {
-                        // Создаем метку краски в центре обнаруженной стены
-                        PaintWall(hit.pose.position, hit.pose.rotation, plane);
-                        Debug.Log($"[WallDetection] ✅ ВСЯ СТЕНА выделена! ({wallPixels.Count} пикселей)");
-                        
-                        // TODO: Здесь должна быть полная заливка стены, а не одна точка
-                        break;
-                    }
-                }
-            }
+            */
         }
 
         /// <summary>

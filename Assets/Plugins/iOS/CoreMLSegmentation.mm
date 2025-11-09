@@ -211,13 +211,29 @@ extern "C" {
         }
     }
     
-    // Сегментация текущего AR кадра
+    // Глобальная переменная для хранения текущего AR frame
+    static CVPixelBufferRef currentARFrame = nil;
+    
+    // НОВАЯ ФУНКЦИЯ: Unity вызывает её каждый кадр, передавая текстуру камеры
+    void CoreML_SetARFrame(CVPixelBufferRef pixelBuffer) {
+        @autoreleasepool {
+            // Освобождаем предыдущий кадр
+            if (currentARFrame != nil) {
+                CVPixelBufferRelease(currentARFrame);
+            }
+            
+            // Сохраняем новый кадр
+            currentARFrame = pixelBuffer;
+            if (currentARFrame != nil) {
+                CVPixelBufferRetain(currentARFrame);
+            }
+        }
+    }
+    
+    // Сегментация текущего AR кадра (ИСПРАВЛЕНО - использует реальную камеру!)
     void CoreML_SegmentCurrentFrame(uint8_t* outputBuffer, int bufferSize, int resolution) {
         @autoreleasepool {
             NSLog(@"[Unity → CoreML] SegmentCurrentFrame called (resolution: %d)", resolution);
-            
-            // TODO: Получить текущий AR frame из ARSession
-            // Для начала используем placeholder
             
             CoreMLSegmentation *segmentation = [CoreMLSegmentation sharedInstance];
             
@@ -226,23 +242,41 @@ extern "C" {
                 return;
             }
             
-            // ВРЕМЕННОЕ РЕШЕНИЕ: создаём тестовое изображение
-            // В реальности здесь должен быть AR camera frame
-            UIImage *testImage = [UIImage imageNamed:@"test.jpg"];
-            if (!testImage) {
-                // Создаём черное изображение для теста
+            // ИСПРАВЛЕНО: Используем реальный AR frame!
+            CVPixelBufferRef pixelBuffer = currentARFrame;
+            
+            if (pixelBuffer == nil) {
+                // Первый запуск - еще нет frames, создаём заглушку
+                static int warningCount = 0;
+                if (warningCount < 3) {
+                    NSLog(@"[CoreML] ⏳ Ожидание AR frame... (попытка %d)", ++warningCount);
+                }
+                
+                // Создаём черное изображение для первого кадра
                 UIGraphicsBeginImageContext(CGSizeMake(resolution, resolution));
-                testImage = UIGraphicsGetImageFromCurrentImageContext();
+                UIImage *testImage = UIGraphicsGetImageFromCurrentImageContext();
                 UIGraphicsEndImageContext();
+                
+                NSData *maskData = [segmentation segmentImage:testImage withResolution:resolution];
+                if (maskData && maskData.length == bufferSize) {
+                    memcpy(outputBuffer, maskData.bytes, bufferSize);
+                }
+                return;
             }
             
-            // Выполняем inference
-            NSData *maskData = [segmentation segmentImage:testImage withResolution:resolution];
+            // Конвертируем CVPixelBuffer → UIImage
+            CIImage *ciImage = [CIImage imageWithCVPixelBuffer:pixelBuffer];
+            CIContext *context = [CIContext contextWithOptions:nil];
+            CGImageRef cgImage = [context createCGImage:ciImage fromRect:ciImage.extent];
+            UIImage *cameraImage = [UIImage imageWithCGImage:cgImage];
+            CGImageRelease(cgImage);
+            
+            // Выполняем inference на РЕАЛЬНОМ изображении камеры
+            NSData *maskData = [segmentation segmentImage:cameraImage withResolution:resolution];
             
             if (maskData && maskData.length == bufferSize) {
-                // Копируем результат в Unity buffer
                 memcpy(outputBuffer, maskData.bytes, bufferSize);
-                NSLog(@"[CoreML → Unity] ✅ Маска скопирована (%d bytes)", bufferSize);
+                NSLog(@"[CoreML → Unity] ✅ Маска скопирована (REAL CAMERA) (%d bytes)", bufferSize);
             } else {
                 NSLog(@"[CoreML] ❌ Размер маски не совпадает: %lu != %d", 
                       (unsigned long)maskData.length, bufferSize);
@@ -290,6 +324,105 @@ extern "C" {
         @autoreleasepool {
             CoreMLSegmentation *segmentation = [CoreMLSegmentation sharedInstance];
             return segmentation.isInitialized;
+        }
+    }
+    
+    // НОВАЯ ФУНКЦИЯ: Принимает frame из Unity Texture2D (RGB24 byte array)
+    void CoreML_SetARFrameFromTexture(uint8_t* pixelData, int width, int height) {
+        @autoreleasepool {
+            static int frameCount = 0;
+            frameCount++;
+            
+            if (frameCount == 1) {
+                NSLog(@"[Unity → CoreML] ✅ Получаем кадры из Texture2D!");
+                NSLog(@"[Unity → CoreML] Размер: %dx%d, format: RGB24", width, height);
+            }
+            
+            // Освобождаем предыдущий кадр
+            if (currentARFrame != nil) {
+                CVPixelBufferRelease(currentARFrame);
+                currentARFrame = nil;
+            }
+            
+            // ✅ ПРАВИЛЬНЫЙ СПОСОБ: Создаем UIImage напрямую из NSData
+            // Это избегает проблем с bytes per row alignment
+            NSData *imageData = [NSData dataWithBytes:pixelData length:(width * height * 3)];
+            
+            // Создаем CGDataProvider из данных
+            CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)imageData);
+            
+            // Создаем CGImage напрямую (без CGContext)
+            CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+            
+            CGImageRef cgImage = CGImageCreate(
+                width,                          // width
+                height,                         // height
+                8,                              // bits per component
+                24,                             // bits per pixel (RGB = 8*3)
+                width * 3,                      // bytes per row
+                colorSpace,                     // color space
+                kCGBitmapByteOrderDefault,      // bitmap info (без alpha)
+                provider,                       // data provider
+                NULL,                           // decode
+                false,                          // should interpolate
+                kCGRenderingIntentDefault       // intent
+            );
+            
+            if (cgImage == NULL) {
+                NSLog(@"[CoreML] ❌ Не удалось создать CGImage");
+                CGColorSpaceRelease(colorSpace);
+                CGDataProviderRelease(provider);
+                return;
+            }
+            
+            // Создаем UIImage из CGImage
+            UIImage *cameraImage = [UIImage imageWithCGImage:cgImage];
+            
+            // Сохраняем как "текущий AR frame" (конвертируем обратно в CVPixelBuffer для совместимости)
+            NSDictionary *options = @{
+                (NSString *)kCVPixelBufferCGImageCompatibilityKey: @YES,
+                (NSString *)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES
+            };
+            
+            CVPixelBufferRef pixelBuffer = NULL;
+            CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                width,
+                height,
+                kCVPixelFormatType_32BGRA,
+                (__bridge CFDictionaryRef)options,
+                &pixelBuffer
+            );
+            
+            if (pixelBuffer != NULL) {
+                CVPixelBufferLockBaseAddress(pixelBuffer, 0);
+                void *baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer);
+                
+                CGContextRef pixelContext = CGBitmapContextCreate(
+                    baseAddress,
+                    width,
+                    height,
+                    8,
+                    CVPixelBufferGetBytesPerRow(pixelBuffer),
+                    colorSpace,
+                    kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrderDefault
+                );
+                
+                CGContextDrawImage(pixelContext, CGRectMake(0, 0, width, height), cgImage);
+                CGContextRelease(pixelContext);
+                CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+                
+                currentARFrame = pixelBuffer;  // Сохраняем для использования в CoreML_SegmentCurrentFrame
+                
+                if (frameCount % 50 == 0) {
+                    NSLog(@"[CoreML] ℹ️ Обработано %d кадров из Texture2D", frameCount);
+                }
+            }
+            
+            // Cleanup
+            CGImageRelease(cgImage);
+            CGDataProviderRelease(provider);
+            CGColorSpaceRelease(colorSpace);
         }
     }
 }

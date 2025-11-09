@@ -64,6 +64,18 @@ namespace RemaluxAR.AR
                 return;
             }
             
+            // ⚠️ КРИТИЧЕСКАЯ ПРОВЕРКА: У плоскости должен быть mesh!
+            var meshFilter = wall.GetComponent<MeshFilter>();
+            if (meshFilter == null || meshFilter.mesh == null || meshFilter.mesh.vertexCount == 0)
+            {
+                Debug.LogWarning($"[WallPainting] ⏳ Стена {wall.trackableId} еще не имеет mesh! " +
+                                $"Подождите пару секунд, пока ARKit сгенерирует geometry. " +
+                                $"Продолжайте медленно двигать телефон.");
+                return;
+            }
+            
+            Debug.Log($"[WallPainting] ✅ Mesh готов: {meshFilter.mesh.vertexCount} vertices");
+            
             // Сохраняем оригинальный материал если еще не сохранен
             if (!originalMaterials.ContainsKey(wall))
             {
